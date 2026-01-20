@@ -124,13 +124,55 @@ function newestFirst(arr) {
 }
 
 async function getCinemetaTitle(type, baseId) {
-  // Cinemeta expects type: movie|series and id: tt....
+  // 1. Próba oficjalna: Cinemeta (dodajemy User-Agent, bo czasem blokują)
   const url = `https://v3-cinemeta.stremio.com/meta/${type}/${baseId}.json`;
-  const r = await fetch(url).catch(() => null);
-  if (!r || !r.ok) return null;
-  const j = await r.json().catch(() => null);
-  const name = j?.meta?.name;
-  return typeof name === "string" ? name : null;
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": "Stremio-Addon-Node/1.0" } });
+    if (r.ok) {
+      const j = await r.json();
+      if (j?.meta?.name) {
+        console.log(`✅ Tytuł z Cinemeta: "${j.meta.name}"`);
+        return j.meta.name;
+      }
+    }
+  } catch (e) {
+    // ignorujemy błąd sieci, idziemy do fallbacku
+  }
+
+  // 2. Fallback: Jeśli Cinemeta zawiodła, pytamy bezpośrednio IMDb
+  // To zadziała dla każdego ID "tt...", którego Cinemeta jeszcze nie ma
+  if (baseId.startsWith("tt")) {
+    console.log(`⚠️ Cinemeta nie zna ${baseId}, próbuję IMDb...`);
+    try {
+      const r = await fetch(`https://www.imdb.com/title/${baseId}/`, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.9" // Wymuszamy angielski tytuł
+        }
+      });
+      
+      if (r.ok) {
+        const html = await r.text();
+        // Wyciągamy tytuł z tagu <title> np. "Daredevil: Born Again (TV Series 2024– ) - IMDb"
+        const match = html.match(/<title>(.*?)<\/title>/i);
+        if (match && match[1]) {
+          let rawTitle = match[1];
+          // Czyścimy śmieci typu " - IMDb", "(TV Series...)"
+          rawTitle = rawTitle.replace(" - IMDb", "")
+                             .replace(/\(TV Series.*?\)/i, "")
+                             .replace(/\(TV Mini.*?\)/i, "")
+                             .trim();
+          
+          console.log(`🌍 Tytuł z IMDb (fallback): "${rawTitle}"`);
+          return rawTitle;
+        }
+      }
+    } catch (e) {
+      console.error("❌ Błąd IMDb fallback:", e.message);
+    }
+  }
+
+  return null;
 }
 
 async function getRdDownloads() {
