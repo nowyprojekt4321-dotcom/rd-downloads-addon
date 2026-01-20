@@ -175,20 +175,55 @@ async function getCinemetaTitle(type, baseId) {
   return null;
 }
 
-async function getRdDownloads() {
-  const url = "https://api.real-debrid.com/rest/1.0/downloads?limit=200";
-  const r = await fetch(url, {
-    headers: { Authorization: `Bearer ${RD_TOKEN}` }
-  });
+/* =========================
+   CACHE (Pamięć podręczna)
+========================= */
+let cachedDownloads = [];
+let lastFetchTime = 0;
+const CACHE_DURATION = 2 * 60 * 1000; // 2 minuty (w milisekundach)
 
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    console.error("❌ RD API error:", r.status, txt.slice(0, 200));
-    return [];
+async function getRdDownloads() {
+  const now = Date.now();
+
+  // 1. Jeśli mamy dane w pamięci i są świeże (młodsze niż 2 min) -> użyj ich
+  if (cachedDownloads.length > 0 && (now - lastFetchTime < CACHE_DURATION)) {
+    console.log("⚡ Używam listy plików z cache (oszczędzam API RD)");
+    return cachedDownloads;
   }
 
-  const data = await r.json().catch(() => []);
-  return Array.isArray(data) ? data : [];
+  // 2. Jeśli cache jest stary -> pytamy Real-Debrid
+  console.log("🔄 Pobieram świeżą listę z Real-Debrid...");
+  const url = "https://api.real-debrid.com/rest/1.0/downloads?limit=200";
+  try {
+    const r = await fetch(url, {
+      headers: { Authorization: `Bearer ${RD_TOKEN}` }
+    });
+
+    if (!r.ok) {
+      // Jeśli RD rzuci błędem (np. 503, 429), spróbujmy zwrócić stary cache jeśli go mamy
+      console.error(`❌ RD API error: ${r.status} ${r.statusText}`);
+      if (cachedDownloads.length > 0) {
+          console.log("⚠️ Zwracam stary cache awaryjnie.");
+          return cachedDownloads;
+      }
+      return [];
+    }
+
+    const data = await r.json().catch(() => []);
+    
+    if (Array.isArray(data)) {
+      cachedDownloads = data; // Zapisz do pamięci
+      lastFetchTime = now;    // Zapisz czas
+      return data;
+    }
+    return [];
+
+  } catch (err) {
+    console.error("❌ Błąd sieci RD:", err.message);
+    // W razie błędu sieci (jak socket hang up), też ratuj się starym cachem
+    if (cachedDownloads.length > 0) return cachedDownloads;
+    return [];
+  }
 }
 
 // ✅ hosters only (exclude RD cache/torrent-like)
