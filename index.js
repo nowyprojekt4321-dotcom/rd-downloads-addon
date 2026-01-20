@@ -282,7 +282,7 @@ function hostersOnly(downloads) {
  * Pick best candidate by score, with threshold + margin.
  * Returns null if not confident.
  */
-function pickBestByScore(candidates, titleTokens, { minScore = 0.55, minHits = 1, margin = 0.08 } = {}) {
+function pickBestByScore(candidates, titleTokens, { minScore = 0.45, minHits = 1, margin = 0.08 } = {}) {
   if (!candidates.length) return null;
   if (!titleTokens.length) return null;
 
