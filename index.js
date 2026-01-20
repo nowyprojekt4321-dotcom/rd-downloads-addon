@@ -176,55 +176,86 @@ async function getCinemetaTitle(type, baseId) {
 }
 
 /* =========================
-   CACHE (Pamięć podręczna)
+   CACHE I PAGINACJA (Obsługa dużej historii)
 ========================= */
-let cachedDownloads = [];
-let lastFetchTime = 0;
-const CACHE_DURATION = 2 * 60 * 1000; // 2 minuty (w milisekundach)
+// Zmienne globalne trzymające Twoje pliki w RAM-ie
+let ALL_DOWNLOADS_CACHE = [];
+let isUpdating = false;
 
-async function getRdDownloads() {
-  const now = Date.now();
+// Funkcja synchronizująca: Pobiera stronę po stronie (1, 2, 3... 19)
+async function syncAllDownloads() {
+  if (isUpdating) return; // Jeśli już pobiera, nie przeszkadzaj
+  isUpdating = true;
+  console.log("🔄 [SYNC] Rozpoczynam pobieranie pełnej historii Real-Debrid...");
 
-  // 1. Jeśli mamy dane w pamięci i są świeże (młodsze niż 2 min) -> użyj ich
-  if (cachedDownloads.length > 0 && (now - lastFetchTime < CACHE_DURATION)) {
-    console.log("⚡ Używam listy plików z cache (oszczędzam API RD)");
-    return cachedDownloads;
-  }
+  let page = 1;
+  const limit = 100; // Bezpieczna wielkość strony
+  let allItems = []; // Tymczasowy kontener
+  let keepFetching = true;
 
-  // 2. Jeśli cache jest stary -> pytamy Real-Debrid
-  console.log("🔄 Pobieram świeżą listę z Real-Debrid...");
-  const url = "https://api.real-debrid.com/rest/1.0/downloads?limit=200";
   try {
-    const r = await fetch(url, {
-      headers: { Authorization: `Bearer ${RD_TOKEN}` }
-    });
-
-    if (!r.ok) {
-      // Jeśli RD rzuci błędem (np. 503, 429), spróbujmy zwrócić stary cache jeśli go mamy
-      console.error(`❌ RD API error: ${r.status} ${r.statusText}`);
-      if (cachedDownloads.length > 0) {
-          console.log("⚠️ Zwracam stary cache awaryjnie.");
-          return cachedDownloads;
+    while (keepFetching) {
+      // Budujemy URL z numerem strony
+      const url = `https://api.real-debrid.com/rest/1.0/downloads?limit=${limit}&page=${page}`;
+      
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${RD_TOKEN}` } });
+      
+      if (!r.ok) {
+        console.error(`❌ [SYNC] Błąd pobierania strony ${page}: ${r.status}`);
+        break; // Przerywamy w razie błędu API
       }
-      return [];
+
+      const data = await r.json().catch(() => []);
+      
+      if (!Array.isArray(data) || data.length === 0) {
+        // Pusta tablica = koniec historii
+        keepFetching = false;
+      } else {
+        // Doklejamy pobrane pliki do listy
+        allItems = allItems.concat(data);
+        console.log(`   --> Pbrano stronę ${page} (Razem: ${allItems.length})`);
+        
+        // Jeśli RD zwróciło mniej wyników niż limit (np. 45 zamiast 100), to jest to ostatnia strona
+        if (data.length < limit) {
+          keepFetching = false;
+        } else {
+          page++; // Idziemy do kolejnej strony
+          // Mała pauza 200ms, żeby być miłym dla API
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
     }
 
-    const data = await r.json().catch(() => []);
-    
-    if (Array.isArray(data)) {
-      cachedDownloads = data; // Zapisz do pamięci
-      lastFetchTime = now;    // Zapisz czas
-      return data;
+    // Jeśli udało się coś pobrać, aktualizujemy główny CACHE
+    if (allItems.length > 0) {
+      console.log(`✅ [SYNC] Sukces! Zapisano w pamięci ${allItems.length} plików.`);
+      ALL_DOWNLOADS_CACHE = allItems;
     }
-    return [];
 
   } catch (err) {
-    console.error("❌ Błąd sieci RD:", err.message);
-    // W razie błędu sieci (jak socket hang up), też ratuj się starym cachem
-    if (cachedDownloads.length > 0) return cachedDownloads;
-    return [];
+    console.error("❌ [SYNC] Krytyczny błąd pętli:", err.message);
+  } finally {
+    isUpdating = false;
   }
 }
+
+// Główna funkcja, którą wywołuje reszta wtyczki
+// Teraz działa błyskawicznie, bo zwraca tylko to, co jest w RAM-ie
+async function getRdDownloads() {
+  // Jeśli serwer dopiero wstał i pamięć jest pusta -> wymuś pobranie natychmiast
+  if (ALL_DOWNLOADS_CACHE.length === 0) {
+    console.log("⚠️ Cache pusty (start serwera), pobieram dane...");
+    await syncAllDownloads();
+  }
+  return ALL_DOWNLOADS_CACHE;
+}
+
+// Automat: Uruchamiaj synchronizację co 15 minut (w tle)
+// Dzięki temu nowe pobrania pojawią się same, bez restartu
+setInterval(() => {
+  console.log("⏰ Czas na cykliczną aktualizację listy...");
+  syncAllDownloads();
+}, 15 * 60 * 1000);
 
 // ✅ hosters only (exclude RD cache/torrent-like)
 function hostersOnly(downloads) {
@@ -431,4 +462,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("✅ RD Downloads (Hosters • Fuzzy) addon running");
   console.log(`👉 http://127.0.0.1:${PORT}/manifest.json`);
   console.log(`👉 http://127.0.0.1:${PORT}/debug/hosters`);
+
+  // DODAJ TĘ LINIJKĘ TUTAJ:
+  syncAllDownloads();
 });
