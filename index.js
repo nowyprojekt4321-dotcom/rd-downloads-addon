@@ -13,7 +13,7 @@ if (!RD_TOKEN) {
 }
 
 /* =========================
-   CORS
+   CORS & SETUP
 ========================= */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -24,31 +24,26 @@ app.use((req, res, next) => {
 });
 
 /* =========================
-   HELPERS
+   CACHE & DATABASE
 ========================= */
+let ALL_DOWNLOADS_CACHE = []; // Surowe pliki z RD
+let METADATA_CACHE = {};      // Mapowanie: nazwa pliku -> { id, poster, name }
+let isUpdating = false;
 
-// convert leetspeak -> letters (basic)
+/* =========================
+   HELPERS (String & Score)
+========================= */
 function deLeet(s) {
   return String(s || "")
-    .replace(/0/g, "o")
-    .replace(/1/g, "i")
-    .replace(/2/g, "z")
-    .replace(/3/g, "e")
-    .replace(/4/g, "a")
-    .replace(/5/g, "s")
-    .replace(/6/g, "g")
-    .replace(/7/g, "t")
-    .replace(/8/g, "b")
-    .replace(/9/g, "g");
+    .replace(/0/g, "o").replace(/1/g, "i").replace(/2/g, "z")
+    .replace(/3/g, "e").replace(/4/g, "a").replace(/5/g, "s")
+    .replace(/6/g, "g").replace(/7/g, "t").replace(/8/g, "b");
 }
 
 function normalizeForTokens(s) {
   return deLeet(String(s || "").toLowerCase())
-    .replace(/&/g, " and ")
-    .replace(/['’]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/&/g, " and ").replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 const STOP = new Set([
@@ -56,423 +51,351 @@ const STOP = new Set([
   "season","s","episode","ep","e","part","vol","volume",
   "multi","1080p","720p","2160p","web","webdl","webrip","bluray","brrip",
   "h264","h265","x264","x265","hevc","aac","ddp","atmos","dts","hdr","sdr",
-  "proper","repack","remux","dv","dolby","vision","imax"
+  "proper","repack","remux","dv","dolby","vision","imax","mixio","ralf"
 ]);
 
 function tokenize(s) {
-  const t = normalizeForTokens(s).split(" ").filter(Boolean);
-  return t.filter(w => !STOP.has(w));
+  return normalizeForTokens(s).split(" ").filter(Boolean).filter(w => !STOP.has(w));
 }
 
-// ULEPSZONY SCORE: Liczy trafione znaki, a nie tylko słowa
-// Dzięki temu 'Marvel' (6 znaków) jest ważniejszy niż błąd w 'Ms' (2 znaki)
+// ULEPSZONY SCORE (Znakowy)
 function tokenScore(needles, haystackTokens) {
   if (!needles.length) return 0;
   const hay = new Set(haystackTokens);
-  
   let totalLen = 0;
   let hitLen = 0;
-  
   for (const n of needles) {
     totalLen += n.length;
-    if (hay.has(n)) {
-      hitLen += n.length;
-    }
+    if (hay.has(n)) hitLen += n.length;
   }
-  
   return totalLen === 0 ? 0 : hitLen / totalLen;
 }
 
-// Stremio series IDs usually: ttXXXX:season:episode
-// but we defensively handle: ttXXXX or even ttXXXX:1:1:extra
 function parseSeasonEpisode(stremioId) {
   const parts = String(stremioId || "").split(":").filter(Boolean);
-  const baseId = parts[0] || "";
-  const season = parts.length >= 2 ? String(parts[1]) : null;
-  const episode = parts.length >= 3 ? String(parts[2]) : null;
   return {
-    baseId,
-    season: season ? season.padStart(2, "0") : null,
-    episode: episode ? episode.padStart(2, "0") : null
+    baseId: parts[0] || "",
+    season: parts.length >= 2 ? String(parts[1]).padStart(2, "0") : null,
+    episode: parts.length >= 3 ? String(parts[2]).padStart(2, "0") : null
   };
 }
 
 function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
-
-  const raw = String(filename || "");
   const norm = normalizeForTokens(filename);
+  const raw = String(filename || "");
+  const sNum = Number(season);
+  const eNum = Number(episode);
 
-  const sNum = String(Number(season));
-  const eNum = String(Number(episode));
-  const eNum2 = String(Number(episode)).padStart(2, "0");
-
-  // normalized patterns
-  const reSxE = new RegExp(`\\bs\\s*0*${sNum}\\s*e\\s*0*${eNum}\\b`, "i");
+  const reSxE = new RegExp(`\\bs\\s*0*${sNum}\\s*?e\\s*0*${eNum}\\b`, "i");
   const reX = new RegExp(`\\b0*${sNum}\\s*x\\s*0*${eNum}\\b`, "i");
+  const reRawDot = new RegExp(`S0*${sNum}[. ]?E0*${eNum}`, "i");
+  
+  let reAbs = null;
+  if (sNum < 10) reAbs = new RegExp(`\\b${sNum}0*${eNum}\\b`, "i");
 
-  // raw dot style S01E01
-  const reDot = new RegExp(`S0*${sNum}E0*${eNum}`, "i");
-  const reDot2 = new RegExp(`S0*${sNum}E${eNum2}`, "i");
-  const reXraw = new RegExp(`${sNum}x0*${eNum}`, "i");
-
-  return (
-    reSxE.test(norm) ||
-    reX.test(norm) ||
-    reDot.test(raw) ||
-    reDot2.test(raw) ||
-    reXraw.test(raw)
-  );
-}
-
-function newestFirst(arr) {
-  return arr.slice().sort((a, b) => {
-    const da = Date.parse(a.generated || 0) || 0;
-    const db = Date.parse(b.generated || 0) || 0;
-    return db - da;
-  });
-}
-
-async function getCinemetaTitle(type, baseId) {
-  // 1. Próba oficjalna: Cinemeta (dodajemy User-Agent, bo czasem blokują)
-  const url = `https://v3-cinemeta.stremio.com/meta/${type}/${baseId}.json`;
-  try {
-    const r = await fetch(url, { headers: { "User-Agent": "Stremio-Addon-Node/1.0" } });
-    if (r.ok) {
-      const j = await r.json();
-      if (j?.meta?.name) {
-        console.log(`✅ Tytuł z Cinemeta: "${j.meta.name}"`);
-        return j.meta.name;
-      }
-    }
-  } catch (e) {
-    // ignorujemy błąd sieci, idziemy do fallbacku
-  }
-
-  // 2. Fallback: Jeśli Cinemeta zawiodła, pytamy bezpośrednio IMDb
-  // To zadziała dla każdego ID "tt...", którego Cinemeta jeszcze nie ma
-  if (baseId.startsWith("tt")) {
-    console.log(`⚠️ Cinemeta nie zna ${baseId}, próbuję IMDb...`);
-    try {
-      const r = await fetch(`https://www.imdb.com/title/${baseId}/`, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept-Language": "en-US,en;q=0.9" // Wymuszamy angielski tytuł
-        }
-      });
-      
-      if (r.ok) {
-        const html = await r.text();
-        // Wyciągamy tytuł z tagu <title> np. "Daredevil: Born Again (TV Series 2024– ) - IMDb"
-        const match = html.match(/<title>(.*?)<\/title>/i);
-        if (match && match[1]) {
-          let rawTitle = match[1];
-          // Czyścimy śmieci typu " - IMDb", "(TV Series...)"
-          rawTitle = rawTitle.replace(" - IMDb", "")
-                             .replace(/\(TV Series.*?\)/i, "")
-                             .replace(/\(TV Mini.*?\)/i, "")
-                             .trim();
-          
-          console.log(`🌍 Tytuł z IMDb (fallback): "${rawTitle}"`);
-          return rawTitle;
-        }
-      }
-    } catch (e) {
-      console.error("❌ Błąd IMDb fallback:", e.message);
-    }
-  }
-
-  return null;
+  return reSxE.test(norm) || reX.test(norm) || reRawDot.test(raw) || (reAbs && reAbs.test(norm));
 }
 
 /* =========================
-   CACHE I PAGINACJA (Obsługa dużej historii)
+   METADATA SEARCH (Szukanie plakatów)
 ========================= */
-// Zmienne globalne trzymające Twoje pliki w RAM-ie
-let ALL_DOWNLOADS_CACHE = [];
-let isUpdating = false;
+// Funkcja szuka plakatu w Cinemeta na podstawie nazwy pliku
+async function findMetaForFile(filename) {
+  // Próbujemy wyczyścić nazwę (usuwamy S01E01 i śmieci)
+  const cleanName = filename
+    .replace(/(S\d{1,2}E\d{1,2}|S\d{1,2}).*/i, "") // Ucinamy wszystko od S01...
+    .replace(/(1080p|720p|2160p|WEB|BluRay).*/i, "")
+    .replace(/\./g, " ")
+    .trim();
 
-// Funkcja synchronizująca: Pobiera stronę po stronie (1, 2, 3... 19)
-async function syncAllDownloads() {
-  if (isUpdating) return; // Jeśli już pobiera, nie przeszkadzaj
-  isUpdating = true;
-  console.log("🔄 [SYNC] Rozpoczynam pobieranie pełnej historii Real-Debrid...");
-
-  let page = 1;
-  const limit = 100; // Bezpieczna wielkość strony
-  let allItems = []; // Tymczasowy kontener
-  let keepFetching = true;
-
+  const type = filename.match(/S\d{2}/i) ? "series" : "movie";
+  
   try {
-    while (keepFetching) {
-      // Budujemy URL z numerem strony
-      const url = `https://api.real-debrid.com/rest/1.0/downloads?limit=${limit}&page=${page}`;
-      
-      const r = await fetch(url, { headers: { Authorization: `Bearer ${RD_TOKEN}` } });
-      
-      if (!r.ok) {
-        console.error(`❌ [SYNC] Błąd pobierania strony ${page}: ${r.status}`);
-        break; // Przerywamy w razie błędu API
-      }
-
-      const data = await r.json().catch(() => []);
-      
-      if (!Array.isArray(data) || data.length === 0) {
-        // Pusta tablica = koniec historii
-        keepFetching = false;
-      } else {
-        // Doklejamy pobrane pliki do listy
-        allItems = allItems.concat(data);
-        console.log(`   --> Pbrano stronę ${page} (Razem: ${allItems.length})`);
-        
-        // Jeśli RD zwróciło mniej wyników niż limit (np. 45 zamiast 100), to jest to ostatnia strona
-        if (data.length < limit) {
-          keepFetching = false;
-        } else {
-          page++; // Idziemy do kolejnej strony
-          // Mała pauza 200ms, żeby być miłym dla API
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-      }
+    // Szukamy w katalogu Cinemeta
+    const searchUrl = `https://v3-cinemeta.stremio.com/catalog/${type}/top/search=${encodeURIComponent(cleanName)}.json`;
+    const r = await fetch(searchUrl);
+    const j = await r.json();
+    
+    if (j && j.metas && j.metas.length > 0) {
+      // Bierzemy pierwszy wynik
+      return {
+        id: j.metas[0].imdb_id || j.metas[0].id,
+        name: j.metas[0].name,
+        poster: j.metas[0].poster,
+        type: type
+      };
     }
-
-    // Jeśli udało się coś pobrać, aktualizujemy główny CACHE
-    if (allItems.length > 0) {
-      console.log(`✅ [SYNC] Sukces! Zapisano w pamięci ${allItems.length} plików.`);
-      ALL_DOWNLOADS_CACHE = allItems;
-    }
-
-  } catch (err) {
-    console.error("❌ [SYNC] Krytyczny błąd pętli:", err.message);
-  } finally {
-    isUpdating = false;
+  } catch (e) {
+    // cicho sza
   }
+  
+  // Jak nie znajdzie, zwracamy fallback (bez plakatu)
+  return {
+    id: "rd_" + Math.random().toString(36).substr(2, 9),
+    name: cleanName || filename,
+    poster: null,
+    type: type
+  };
 }
 
-// Główna funkcja, którą wywołuje reszta wtyczki
-// Teraz działa błyskawicznie, bo zwraca tylko to, co jest w RAM-ie
-async function getRdDownloads() {
-  // Jeśli serwer dopiero wstał i pamięć jest pusta -> wymuś pobranie natychmiast
-  if (ALL_DOWNLOADS_CACHE.length === 0) {
-    console.log("⚠️ Cache pusty (start serwera), pobieram dane...");
-    await syncAllDownloads();
+// Kolejka do uzupełniania plakatów w tle
+async function processMetadataQueue() {
+  console.log("🎨 [META] Rozpoczynam uzupełnianie plakatów...");
+  const queue = ALL_DOWNLOADS_CACHE.filter(d => !METADATA_CACHE[d.id]); // Tylko te bez metadanych
+  
+  // Limitujemy, żeby nie zamęczyć Cinemety (1 zapytanie na sekundę max)
+  for (const item of queue) {
+    // Sprawdzamy czy już nie mamy tego w cache
+    if (METADATA_CACHE[item.id]) continue;
+
+    const meta = await findMetaForFile(item.filename);
+    METADATA_CACHE[item.id] = meta;
+    
+    // console.log(`   -> Zidentyfikowano: ${item.filename} JAKO ${meta.name}`);
+    
+    // Pauza 500ms
+    await new Promise(r => setTimeout(r, 500));
   }
-  return ALL_DOWNLOADS_CACHE;
+  console.log("🎨 [META] Zakończono uzupełnianie.");
 }
 
-// Automat: Uruchamiaj synchronizację co 15 minut (w tle)
-// Dzięki temu nowe pobrania pojawią się same, bez restartu
-setInterval(() => {
-  console.log("⏰ Czas na cykliczną aktualizację listy...");
-  syncAllDownloads();
-}, 15 * 60 * 1000);
+/* =========================
+   CORE LOGIC (Sync & Get)
+========================= */
 
-// ✅ hosters only (exclude RD cache/torrent-like)
 function hostersOnly(downloads) {
   return downloads.filter(d => {
     if (d?.streamable !== 1) return false;
     if (!d?.download || !d?.filename) return false;
-
     const link = String(d.link || "").toLowerCase();
-
-    // RD cache / torrent-ish entries
-    if (link.startsWith("https://real-debrid.com/d/") || link.startsWith("http://real-debrid.com/d/")) {
-      return false;
-    }
-
-    // prefer video mimetypes when present
+    if (link.startsWith("https://real-debrid.com/d/") || link.startsWith("http://real-debrid.com/d/")) return false;
     const mime = String(d.mimeType || "").toLowerCase();
     if (mime && !mime.startsWith("video/")) return false;
-
     return true;
   });
 }
 
-/**
- * Pick best candidate by score, with threshold + margin.
- * Returns null if not confident.
- */
-function pickBestByScore(candidates, titleTokens, { minScore = 0.55, minHits = 1, margin = 0.08 } = {}) {
-  if (!candidates.length) return null;
-  if (!titleTokens.length) return null;
-
-  const scored = candidates.map(d => {
-    const ft = tokenize(d.filename);
-    const score = tokenScore(titleTokens, ft);
-    // hit count (more robust for short titles)
-    const hay = new Set(ft);
-    let hits = 0;
-    for (const t of titleTokens) if (hay.has(t)) hits++;
-    return { d, score, hits };
-  }).sort((a, b) => b.score - a.score);
-
-  const best = scored[0];
-  const second = scored[1];
-
-  if (!best) return null;
-  if (best.score < minScore) return null;
-  if (best.hits < minHits) return null;
-
-  // If second exists and is too close → ambiguous
-  if (second && (best.score - second.score) < margin) return null;
-
-  return best.d;
-}
-
-/* =========================
-   MANIFEST
-========================= */
-app.get("/manifest.json", (req, res) => {
-  res.json({
-    id: "community.rd.downloads.hosters.fuzzy.v4", // keep same id so Stremio updates without disappearing
-    version: "0.4.1",
-    name: "RD Downloads (Hosters • Fuzzy)",
-    description: "Streams ONLY RD direct downloads from hosters. Strict matching (no wrong fallbacks) + fuzzy title + episode matching.",
-    resources: ["stream"],
-    types: ["movie", "series"],
-    idPrefixes: ["tt"],
-    catalogs: [],
-    logo: "https://www.stremio.com/website/stremio-logo-small.png",
-    background: "https://www.stremio.com/website/stremio-logo-small.png"
-  });
-});
-
-/* =========================
-   DEBUG
-========================= */
-app.get("/debug/hosters", async (req, res) => {
-  const all = await getRdDownloads();
-  const hosters = hostersOnly(all);
-  res.json({
-    total_downloads: all.length,
-    hosters_only: hosters.length,
-    sample_links_first_10: hosters.slice(0, 10).map(x => x.link),
-    sample_files_first_10: hosters.slice(0, 10).map(x => x.filename)
-  });
-});
-
-app.get("/debug/pick/:type/:id", async (req, res) => {
-  const { type, id } = req.params;
+// Wybieranie najlepszego kandydata (Fuzzy + Length Score)
+async function getStreamCandidate(type, id, hosters) {
   const { baseId, season, episode } = parseSeasonEpisode(id);
 
-  const title = await getCinemetaTitle(type, baseId);
-  const titleTokens = title ? tokenize(title) : [];
+  // 1. Nazwa z Cinemeta / IMDb Fallback
+  let title = null;
+  const cUrl = `https://v3-cinemeta.stremio.com/meta/${type}/${baseId}.json`;
+  
+  try {
+    const r = await fetch(cUrl, { headers: { "User-Agent": "Stremio-Addon-Node/1.0" }});
+    if (r.ok) {
+      const j = await r.json();
+      if (j?.meta?.name) title = j.meta.name;
+    }
+  } catch(e) {}
 
-  const all = await getRdDownloads();
-  const hosters = newestFirst(hostersOnly(all));
+  if (!title && baseId.startsWith("tt")) {
+    // IMDb Fallback
+    try {
+      const r = await fetch(`https://www.imdb.com/title/${baseId}/`, {
+        headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9" }
+      });
+      if (r.ok) {
+        const t = await r.text();
+        const m = t.match(/<title>(.*?)<\/title>/i);
+        if (m && m[1]) title = m[1].replace(" - IMDb", "").replace(/\(TV.*\)/,"").trim();
+      }
+    } catch(e) {}
+  }
 
-  // Candidate pool
+  if (!title) return null;
+
+  // 2. Filtrowanie
   let pool = hosters;
   if (type === "series" && season && episode) {
     pool = hosters.filter(d => matchesEpisode(d.filename, season, episode));
   }
 
+  const titleTokens = tokenize(title);
   const scored = pool.map(d => {
-    const ft = tokenize(d.filename);
-    const score = titleTokens.length ? tokenScore(titleTokens, ft) : 0;
-    return { score, filename: d.filename, link: d.link, download: d.download };
-  }).sort((a, b) => b.score - a.score).slice(0, 50);
+    return { d, score: tokenScore(titleTokens, tokenize(d.filename)) };
+  }).sort((a,b) => b.score - a.score);
 
-  res.json({ type, id, baseId, title, season, episode, candidates: pool.length, top50: scored });
-});
+  const best = scored[0];
+  // Próg 60%
+  if (best && best.score >= 0.6) return best.d;
+  
+  return null;
+}
+
+// SYNC (Pobieranie historii)
+async function syncAllDownloads() {
+  if (isUpdating) return;
+  isUpdating = true;
+  console.log("🔄 [SYNC] Pobieranie historii RD...");
+
+  let page = 1;
+  let allItems = [];
+  let keepFetching = true;
+
+  try {
+    while (keepFetching) {
+      const r = await fetch(`https://api.real-debrid.com/rest/1.0/downloads?limit=100&page=${page}`, {
+        headers: { Authorization: `Bearer ${RD_TOKEN}` }
+      });
+      if (!r.ok) break;
+      const data = await r.json().catch(() => []);
+      
+      if (!Array.isArray(data) || data.length === 0) {
+        keepFetching = false;
+      } else {
+        allItems = allItems.concat(data);
+        if (data.length < 100) keepFetching = false;
+        else page++;
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    if (allItems.length > 0) {
+      ALL_DOWNLOADS_CACHE = allItems;
+      console.log(`✅ [SYNC] Pobranao ${allItems.length} plików.`);
+      
+      // Po pobraniu plików -> uruchom w tle szukanie plakatów
+      processMetadataQueue();
+    }
+  } catch (err) {
+    console.error("❌ [SYNC] Błąd:", err.message);
+  } finally {
+    isUpdating = false;
+  }
+}
 
 /* =========================
-   STREAM
+   ROUTES
 ========================= */
+
+// Manifest
+app.get("/manifest.json", (req, res) => {
+  res.json({
+    id: "community.rd.downloads.pro.v5",
+    version: "0.5.0",
+    name: "RD Downloads + Catalog",
+    description: "Your Real-Debrid files as a Catalog & Stream source.",
+    resources: ["stream", "catalog"], // Dodano "catalog"
+    types: ["movie", "series"],
+    idPrefixes: ["tt", "rd"],
+    catalogs: [
+      {
+        type: "series",
+        id: "rd_series",
+        name: "Moje Seriale (RD)",
+        extra: [{ name: "search", isRequired: false }]
+      },
+      {
+        type: "movie",
+        id: "rd_movies",
+        name: "Moje Filmy (RD)",
+        extra: [{ name: "search", isRequired: false }]
+      }
+    ]
+  });
+});
+
+// KATALOG (To wyświetla kafelki)
+app.get("/catalog/:type/:id.json", async (req, res) => {
+  const { type, id } = req.params;
+  
+  // Interesują nas tylko nasze ID katalogów
+  if (id !== "rd_series" && id !== "rd_movies") return res.json({ metas: [] });
+
+  const hosters = hostersOnly(ALL_DOWNLOADS_CACHE);
+  
+  // Grupujemy pliki, żeby nie wyświetlać 10 razy tego samego serialu
+  // Kluczem jest "Clean Name" lub znalezione ID
+  const uniqueItems = new Map();
+
+  for (const file of hosters) {
+    // Sprawdzamy czy mamy metadata
+    const meta = METADATA_CACHE[file.id];
+    
+    // Jeśli nie mamy meta, pomijamy albo dajemy brzydki wpis (lepiej pominąć w katalogu póki się nie załaduje)
+    // Ale pokażmy fallback
+    const displayName = meta ? meta.name : file.filename;
+    const poster = meta ? meta.poster : null;
+    const detectedType = (meta && meta.type) ? meta.type : (file.filename.match(/S\d{2}/i) ? "series" : "movie");
+
+    // Filtrujemy typ (katalog filmów pokazuje tylko filmy)
+    if (detectedType !== type) continue;
+
+    // Klucz do grupowania (żeby wszystkie odcinki serialu zbić w jeden kafelek)
+    // Jeśli mamy ID z IMDb, używamy go. Jeśli nie, używamy nazwy.
+    const groupKey = (meta && meta.id && meta.id.startsWith("tt")) ? meta.id : displayName;
+
+    if (!uniqueItems.has(groupKey)) {
+      uniqueItems.set(groupKey, {
+        id: (meta && meta.id.startsWith("tt")) ? meta.id : "rd_" + file.id, // Ważne: ID musi być unikalne
+        type: type,
+        name: displayName,
+        poster: poster,
+        description: "Plik na Twoim Real-Debrid"
+      });
+    }
+  }
+
+  // Zamień mapę na tablicę i zwróć (max 100 ostatnich)
+  const metas = Array.from(uniqueItems.values()).slice(0, 100);
+
+  res.json({ metas });
+});
+
+// STREAM
 app.get("/stream/:type/:id.json", async (req, res) => {
   try {
     const { type, id } = req.params;
-    const { baseId, season, episode } = parseSeasonEpisode(id);
-
-    console.log("➡️ stream request:", type, id, "=> baseId:", baseId, "S/E:", season, episode);
-
-    const all = await getRdDownloads();
-    const hosters = newestFirst(hostersOnly(all));
-
-    // ===== SERIES =====
-    if (type === "series") {
-      // Stremio normally asks with season/episode. If not provided, we return nothing (avoid wrong mappings).
-      if (!season || !episode) {
-        return res.json({ streams: [] });
-      }
-
-      const title = await getCinemetaTitle("series", baseId);
-      if (!title) {
-        console.error("⚠️ Cinemeta title not found for:", "series", baseId, "(returning empty to avoid wrong matches)");
-        return res.json({ streams: [] });
-      }
-
-      const titleTokens = tokenize(title);
-
-      // Filter to episode-only pool first
-      const episodePool = hosters.filter(d => matchesEpisode(d.filename, season, episode));
-      if (!episodePool.length) return res.json({ streams: [] });
-
-      // Pick best by fuzzy score (strict)
-      const match = pickBestByScore(episodePool, titleTokens, {
-        minScore: 0.55,
-        minHits: Math.min(1, titleTokens.length), // require 2 hits if possible
-        margin: 0.08
-      });
-
-      if (!match) return res.json({ streams: [] });
-
-      return res.json({
-        streams: [
-          {
-            name: "Real-Debrid Downloads",
-            title: match.filename,
-            url: match.download
-          }
-        ]
-      });
+    console.log(`➡️ Stream: ${type} ${id}`);
+    
+    // Jeśli ID to nasze sztuczne "rd_...", nie mamy co robić (chyba że zmapujemy to ręcznie)
+    // Ale Stremio zazwyczaj używa "tt..." jeśli katalog zwrócił "tt..."
+    // Jeśli użytkownik kliknie w kafelek bez ID (tylko filename), to tutaj trafi "rd_..."
+    // Wtedy po prostu szukamy pliku po ID z RD
+    if (id.startsWith("rd_")) {
+        const fileId = id.replace("rd_", "");
+        const file = ALL_DOWNLOADS_CACHE.find(f => String(f.id) === fileId);
+        if (file) {
+            return res.json({ streams: [{ name: "RD Direct", title: file.filename, url: file.download }] });
+        }
     }
 
-    // ===== MOVIE =====
-    if (type === "movie") {
-      const title = await getCinemetaTitle("movie", baseId);
-      if (!title) {
-        console.error("⚠️ Cinemeta title not found for:", "movie", baseId, "(returning empty to avoid wrong matches)");
-        return res.json({ streams: [] });
-      }
+    const hosters = hostersOnly(ALL_DOWNLOADS_CACHE);
+    const match = await getStreamCandidate(type, id, hosters);
 
-      const titleTokens = tokenize(title);
-
-      const match = pickBestByScore(hosters, titleTokens, {
-        minScore: 0.55,
-        minHits: Math.min(1, titleTokens.length),
-        margin: 0.08
-      });
-
-      if (!match) return res.json({ streams: [] });
-
-      return res.json({
-        streams: [
-          {
-            name: "Real-Debrid Downloads",
-            title: match.filename,
-            url: match.download
-          }
-        ]
+    if (match) {
+       return res.json({
+        streams: [{
+          name: "RD Download",
+          title: match.filename,
+          url: match.download
+        }]
       });
     }
-
-    // unknown type
     return res.json({ streams: [] });
-  } catch (err) {
-    console.error("❌ Stream error:", err);
+  } catch (e) {
+    console.error(e);
     return res.json({ streams: [] });
   }
 });
 
 /* =========================
-   START
+   DEBUG & START
 ========================= */
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("✅ RD Downloads (Hosters • Fuzzy) addon running");
-  console.log(`👉 http://127.0.0.1:${PORT}/manifest.json`);
-  console.log(`👉 http://127.0.0.1:${PORT}/debug/hosters`);
+app.get("/debug/hosters", (req, res) => {
+  res.json({ 
+    total: ALL_DOWNLOADS_CACHE.length,
+    meta_count: Object.keys(METADATA_CACHE).length,
+    sample_meta: Object.values(METADATA_CACHE).slice(0,5)
+  });
+});
 
-  // DODAJ TĘ LINIJKĘ TUTAJ:
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("✅ Addon running with CATALOG support.");
   syncAllDownloads();
+  setInterval(syncAllDownloads, 15 * 60 * 1000);
 });
