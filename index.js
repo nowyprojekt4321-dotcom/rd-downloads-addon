@@ -64,13 +64,23 @@ function tokenize(s) {
   return t.filter(w => !STOP.has(w));
 }
 
-// token overlap score: 0..1
+// ULEPSZONY SCORE: Liczy trafione znaki, a nie tylko słowa
+// Dzięki temu 'Marvel' (6 znaków) jest ważniejszy niż błąd w 'Ms' (2 znaki)
 function tokenScore(needles, haystackTokens) {
   if (!needles.length) return 0;
   const hay = new Set(haystackTokens);
-  let hit = 0;
-  for (const n of needles) if (hay.has(n)) hit++;
-  return hit / needles.length;
+  
+  let totalLen = 0;
+  let hitLen = 0;
+  
+  for (const n of needles) {
+    totalLen += n.length;
+    if (hay.has(n)) {
+      hitLen += n.length;
+    }
+  }
+  
+  return totalLen === 0 ? 0 : hitLen / totalLen;
 }
 
 // Stremio series IDs usually: ttXXXX:season:episode
@@ -282,7 +292,7 @@ function hostersOnly(downloads) {
  * Pick best candidate by score, with threshold + margin.
  * Returns null if not confident.
  */
-function pickBestByScore(candidates, titleTokens, { minScore = 0.45, minHits = 1, margin = 0.08 } = {}) {
+function pickBestByScore(candidates, titleTokens, { minScore = 0.55, minHits = 1, margin = 0.08 } = {}) {
   if (!candidates.length) return null;
   if (!titleTokens.length) return null;
 
@@ -401,7 +411,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
       // Pick best by fuzzy score (strict)
       const match = pickBestByScore(episodePool, titleTokens, {
         minScore: 0.55,
-        minHits: Math.min(2, titleTokens.length), // require 2 hits if possible
+        minHits: Math.min(1, titleTokens.length), // require 2 hits if possible
         margin: 0.08
       });
 
@@ -430,7 +440,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
       const match = pickBestByScore(hosters, titleTokens, {
         minScore: 0.55,
-        minHits: Math.min(2, titleTokens.length),
+        minHits: Math.min(1, titleTokens.length),
         margin: 0.08
       });
 
