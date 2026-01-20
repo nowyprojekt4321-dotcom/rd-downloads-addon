@@ -4,7 +4,6 @@ import "dotenv/config";
 
 const app = express();
 
-// Polecam 3001, bo Windows czasem trzyma 3000 w TIME_WAIT
 const PORT = process.env.PORT || 3001;
 const RD_TOKEN = process.env.RD_TOKEN;
 
@@ -28,9 +27,9 @@ app.use((req, res, next) => {
    HELPERS
 ========================= */
 
-// convert leetspeak -> letters
+// convert leetspeak -> letters (basic)
 function deLeet(s) {
-  return s
+  return String(s || "")
     .replace(/0/g, "o")
     .replace(/1/g, "i")
     .replace(/2/g, "z")
@@ -56,7 +55,8 @@ const STOP = new Set([
   "the","a","an","and","or","of","to","in","on","for","with","from","at","by",
   "season","s","episode","ep","e","part","vol","volume",
   "multi","1080p","720p","2160p","web","webdl","webrip","bluray","brrip",
-  "h264","h265","x264","x265","hevc","aac","ddp","atmos","dts","hdr","sdr"
+  "h264","h265","x264","x265","hevc","aac","ddp","atmos","dts","hdr","sdr",
+  "proper","repack","remux","dv","dolby","vision","imax"
 ]);
 
 function tokenize(s) {
@@ -73,43 +73,58 @@ function tokenScore(needles, haystackTokens) {
   return hit / needles.length;
 }
 
-// parse Stremio ID: ttXXXX:season:episode
+// Stremio series IDs usually: ttXXXX:season:episode
+// but we defensively handle: ttXXXX or even ttXXXX:1:1:extra
 function parseSeasonEpisode(stremioId) {
-  const parts = stremioId.split(":");
-  if (parts.length === 3) {
-    return {
-      baseId: parts[0],
-      season: parts[1].padStart(2, "0"),
-      episode: parts[2].padStart(2, "0")
-    };
-  }
-  return { baseId: parts[0], season: null, episode: null };
+  const parts = String(stremioId || "").split(":").filter(Boolean);
+  const baseId = parts[0] || "";
+  const season = parts.length >= 2 ? String(parts[1]) : null;
+  const episode = parts.length >= 3 ? String(parts[2]) : null;
+  return {
+    baseId,
+    season: season ? season.padStart(2, "0") : null,
+    episode: episode ? episode.padStart(2, "0") : null
+  };
 }
 
 function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
-  const f = normalizeForTokens(filename);
 
-  // S01E01
-  const re1 = new RegExp(`\\bs${Number(season)}\\s*e${Number(episode)}\\b`, "i");
-  // 1x01
-  const re2 = new RegExp(`\\b${Number(season)}\\s*x\\s*${Number(episode)}\\b`, "i");
-  // E01 / EP01 / Episode 01 (when season implied; we still keep season check by requiring "s01" nearby if present)
-  const re3 = new RegExp(`\\b(ep|e|episode)\\s*0*${Number(episode)}\\b`, "i");
-
-  // direct check on raw filename too (for dot-separated)
   const raw = String(filename || "");
+  const norm = normalizeForTokens(filename);
 
   const sNum = String(Number(season));
-  const eNum = String(Number(episode)).padStart(2, "0");
+  const eNum = String(Number(episode));
+  const eNum2 = String(Number(episode)).padStart(2, "0");
 
-  const dotStyle = new RegExp(`S0*${sNum}E0*${Number(episode)}`, "i").test(raw);
-  const xStyle = new RegExp(`${sNum}x0*${Number(episode)}`, "i").test(raw);
+  // normalized patterns
+  const reSxE = new RegExp(`\\bs\\s*0*${sNum}\\s*e\\s*0*${eNum}\\b`, "i");
+  const reX = new RegExp(`\\b0*${sNum}\\s*x\\s*0*${eNum}\\b`, "i");
 
-  return re1.test(f) || re2.test(f) || dotStyle || xStyle || re3.test(f);
+  // raw dot style S01E01
+  const reDot = new RegExp(`S0*${sNum}E0*${eNum}`, "i");
+  const reDot2 = new RegExp(`S0*${sNum}E${eNum2}`, "i");
+  const reXraw = new RegExp(`${sNum}x0*${eNum}`, "i");
+
+  return (
+    reSxE.test(norm) ||
+    reX.test(norm) ||
+    reDot.test(raw) ||
+    reDot2.test(raw) ||
+    reXraw.test(raw)
+  );
+}
+
+function newestFirst(arr) {
+  return arr.slice().sort((a, b) => {
+    const da = Date.parse(a.generated || 0) || 0;
+    const db = Date.parse(b.generated || 0) || 0;
+    return db - da;
+  });
 }
 
 async function getCinemetaTitle(type, baseId) {
+  // Cinemeta expects type: movie|series and id: tt....
   const url = `https://v3-cinemeta.stremio.com/meta/${type}/${baseId}.json`;
   const r = await fetch(url).catch(() => null);
   if (!r || !r.ok) return null;
@@ -134,7 +149,7 @@ async function getRdDownloads() {
   return Array.isArray(data) ? data : [];
 }
 
-// ✅ 100% pewne “hosters only”: wyrzucamy RD cache/torrenty po polu link
+// ✅ hosters only (exclude RD cache/torrent-like)
 function hostersOnly(downloads) {
   return downloads.filter(d => {
     if (d?.streamable !== 1) return false;
@@ -142,7 +157,7 @@ function hostersOnly(downloads) {
 
     const link = String(d.link || "").toLowerCase();
 
-    // RD cache / torrent-ish entries typically look like https://real-debrid.com/d/XXXX
+    // RD cache / torrent-ish entries
     if (link.startsWith("https://real-debrid.com/d/") || link.startsWith("http://real-debrid.com/d/")) {
       return false;
     }
@@ -155,23 +170,46 @@ function hostersOnly(downloads) {
   });
 }
 
-function newestFirst(arr) {
-  return arr.slice().sort((a, b) => {
-    const da = Date.parse(a.generated || 0) || 0;
-    const db = Date.parse(b.generated || 0) || 0;
-    return db - da;
-  });
+/**
+ * Pick best candidate by score, with threshold + margin.
+ * Returns null if not confident.
+ */
+function pickBestByScore(candidates, titleTokens, { minScore = 0.55, minHits = 1, margin = 0.08 } = {}) {
+  if (!candidates.length) return null;
+  if (!titleTokens.length) return null;
+
+  const scored = candidates.map(d => {
+    const ft = tokenize(d.filename);
+    const score = tokenScore(titleTokens, ft);
+    // hit count (more robust for short titles)
+    const hay = new Set(ft);
+    let hits = 0;
+    for (const t of titleTokens) if (hay.has(t)) hits++;
+    return { d, score, hits };
+  }).sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  const second = scored[1];
+
+  if (!best) return null;
+  if (best.score < minScore) return null;
+  if (best.hits < minHits) return null;
+
+  // If second exists and is too close → ambiguous
+  if (second && (best.score - second.score) < margin) return null;
+
+  return best.d;
 }
 
 /* =========================
-   MANIFEST (NEW ID)
+   MANIFEST
 ========================= */
 app.get("/manifest.json", (req, res) => {
   res.json({
-    id: "community.rd.downloads.hosters.fuzzy.v4",
-    version: "0.4.0",
+    id: "community.rd.downloads.hosters.fuzzy.v4", // keep same id so Stremio updates without disappearing
+    version: "0.4.1",
     name: "RD Downloads (Hosters • Fuzzy)",
-    description: "Streams ONLY RD direct downloads from hosters. Fuzzy title match (handles Dar3devil etc.) + episode matching.",
+    description: "Streams ONLY RD direct downloads from hosters. Strict matching (no wrong fallbacks) + fuzzy title + episode matching.",
     resources: ["stream"],
     types: ["movie", "series"],
     idPrefixes: ["tt"],
@@ -201,18 +239,23 @@ app.get("/debug/pick/:type/:id", async (req, res) => {
 
   const title = await getCinemetaTitle(type, baseId);
   const titleTokens = title ? tokenize(title) : [];
+
   const all = await getRdDownloads();
   const hosters = newestFirst(hostersOnly(all));
 
-  // score candidates
-  const scored = hosters.map(d => {
-    const ft = tokenize(d.filename);
-    const score = tokenScore(titleTokens, ft);
-    const epOk = type === "series" && season && episode ? matchesEpisode(d.filename, season, episode) : null;
-    return { score, epOk, filename: d.filename, link: d.link, download: d.download };
-  }).slice(0, 50);
+  // Candidate pool
+  let pool = hosters;
+  if (type === "series" && season && episode) {
+    pool = hosters.filter(d => matchesEpisode(d.filename, season, episode));
+  }
 
-  res.json({ type, id, baseId, title, season, episode, top50: scored });
+  const scored = pool.map(d => {
+    const ft = tokenize(d.filename);
+    const score = titleTokens.length ? tokenScore(titleTokens, ft) : 0;
+    return { score, filename: d.filename, link: d.link, download: d.download };
+  }).sort((a, b) => b.score - a.score).slice(0, 50);
+
+  res.json({ type, id, baseId, title, season, episode, candidates: pool.length, top50: scored });
 });
 
 /* =========================
@@ -220,60 +263,84 @@ app.get("/debug/pick/:type/:id", async (req, res) => {
 ========================= */
 app.get("/stream/:type/:id.json", async (req, res) => {
   try {
-    console.log("➡️ stream request:", req.params.type, req.params.id);
     const { type, id } = req.params;
     const { baseId, season, episode } = parseSeasonEpisode(id);
 
-    const title = await getCinemetaTitle(type, baseId);
-    const titleTokens = title ? tokenize(title) : [];
-
-    if (!title) {
-      console.error("⚠️ Cinemeta title not found for:", type, baseId, "(fallback mode)");
-    }
+    console.log("➡️ stream request:", type, id, "=> baseId:", baseId, "S/E:", season, episode);
 
     const all = await getRdDownloads();
     const hosters = newestFirst(hostersOnly(all));
 
-    let match = null;
-
-    // --- SERIES ---
-    if (type === "series" && season && episode) {
-      // 1) strict episode + fuzzy title (best)
-      if (titleTokens.length) {
-        match = hosters.find(d => {
-          if (!matchesEpisode(d.filename, season, episode)) return false;
-          const ft = tokenize(d.filename);
-          const score = tokenScore(titleTokens, ft);
-          // threshold: need at least ~0.55 match; with 2-3 words it still works
-          return score >= 0.55;
-        });
+    // ===== SERIES =====
+    if (type === "series") {
+      // Stremio normally asks with season/episode. If not provided, we return nothing (avoid wrong mappings).
+      if (!season || !episode) {
+        return res.json({ streams: [] });
       }
 
-      // 2) episode-only fallback (if Cinemeta missing)
-      if (!match) {
-        match = hosters.find(d => matchesEpisode(d.filename, season, episode));
+      const title = await getCinemetaTitle("series", baseId);
+      if (!title) {
+        console.error("⚠️ Cinemeta title not found for:", "series", baseId, "(returning empty to avoid wrong matches)");
+        return res.json({ streams: [] });
       }
+
+      const titleTokens = tokenize(title);
+
+      // Filter to episode-only pool first
+      const episodePool = hosters.filter(d => matchesEpisode(d.filename, season, episode));
+      if (!episodePool.length) return res.json({ streams: [] });
+
+      // Pick best by fuzzy score (strict)
+      const match = pickBestByScore(episodePool, titleTokens, {
+        minScore: 0.55,
+        minHits: Math.min(2, titleTokens.length), // require 2 hits if possible
+        margin: 0.08
+      });
+
+      if (!match) return res.json({ streams: [] });
+
+      return res.json({
+        streams: [
+          {
+            name: "Real-Debrid Downloads",
+            title: match.filename,
+            url: match.download
+          }
+        ]
+      });
     }
 
-    // --- MOVIE or ultimate fallback ---
-    if (!match) {
-      if (titleTokens.length) {
-        match = hosters.find(d => tokenScore(titleTokens, tokenize(d.filename)) >= 0.55);
+    // ===== MOVIE =====
+    if (type === "movie") {
+      const title = await getCinemetaTitle("movie", baseId);
+      if (!title) {
+        console.error("⚠️ Cinemeta title not found for:", "movie", baseId, "(returning empty to avoid wrong matches)");
+        return res.json({ streams: [] });
       }
-      if (!match) match = hosters[0] || null;
+
+      const titleTokens = tokenize(title);
+
+      const match = pickBestByScore(hosters, titleTokens, {
+        minScore: 0.55,
+        minHits: Math.min(2, titleTokens.length),
+        margin: 0.08
+      });
+
+      if (!match) return res.json({ streams: [] });
+
+      return res.json({
+        streams: [
+          {
+            name: "Real-Debrid Downloads",
+            title: match.filename,
+            url: match.download
+          }
+        ]
+      });
     }
 
-    if (!match) return res.json({ streams: [] });
-
-    return res.json({
-      streams: [
-        {
-          name: "Real-Debrid Downloads",
-          title: match.filename,
-          url: match.download
-        }
-      ]
-    });
+    // unknown type
+    return res.json({ streams: [] });
   } catch (err) {
     console.error("❌ Stream error:", err);
     return res.json({ streams: [] });
