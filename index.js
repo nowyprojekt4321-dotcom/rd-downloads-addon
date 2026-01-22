@@ -4,7 +4,7 @@ import "dotenv/config";
 
 const app = express();
 
-// === WAŻNE: CORS (Naprawia błąd instalacji w Stremio) ===
+// === CORS (Dostęp dla Stremio) ===
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -31,10 +31,8 @@ let METADATA_CACHE = {};
 let isUpdating = false;
 
 /* =========================
-   HELPERS (Normalizacja i De-Leet)
+   HELPERS
 ========================= */
-
-// Zamienia leetspeak na tekst (3->e, 4->a, itp.)
 function deLeet(s) {
   return String(s || "")
     .replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e")
@@ -42,23 +40,15 @@ function deLeet(s) {
     .replace(/@/g, "a");
 }
 
-// Czyści nazwę do "wspólnego mianownika"
 function getNormalizedKey(filename) {
-  const clean = String(filename || "")
-    .replace(/\./g, " ") // Kropki na spacje
-    .replace(/_/g, " "); // Podłogi na spacje
-
-  // Wyciągamy sam tytuł (przed S01, 2023, 1080p itp.)
+  const clean = String(filename || "").replace(/[\._]/g, " ");
   const match = clean.match(/^(.+?)(?=\s+(s\d{2}|19\d{2}|20\d{2}|4k|1080p|720p))/i);
   let rawTitle = match && match[1] ? match[1] : clean;
-
-  // DeLeet i małe litery
   return deLeet(rawTitle).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Do wyświetlania ładnej nazwy w UI (bez ucinania za mocno)
 function getDisplayTitle(filename) {
-  const clean = String(filename || "").replace(/\./g, " ");
+  const clean = String(filename || "").replace(/[\._]/g, " ");
   const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
   return match && match[1] ? match[1].trim() : clean;
 }
@@ -77,39 +67,48 @@ function matchesEpisode(filename, season, episode) {
 }
 
 /* =========================
-   METADATA LOGIC
+   METADATA LOGIC (ZABEZPIECZONA)
 ========================= */
 async function fetchCinemeta(idOrName) {
-  if (idOrName.startsWith("tt")) {
+  if (!idOrName.startsWith("tt")) return null;
+
+  try {
+    // Próbujemy pobrać dane dla serialu
     let r = await fetch(`https://v3-cinemeta.stremio.com/meta/series/${idOrName}.json`);
-    let j = await r.json();
-    if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "series" };
+    if (r.ok) {
+      let j = await r.json();
+      if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "series" };
+    }
     
+    // Jeśli nie serial, to może film?
     r = await fetch(`https://v3-cinemeta.stremio.com/meta/movie/${idOrName}.json`);
-    j = await r.json();
-    if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "movie" };
+    if (r.ok) {
+      let j = await r.json();
+      if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "movie" };
+    }
+  } catch (err) {
+    console.error(`⚠️ Błąd Cinemeta dla ${idOrName}:`, err.message);
+    // Zwracamy null, ale NIE CRASHUJEMY serwera
     return null;
   }
   return null;
 }
 
 /* =========================
-   MANAGER UI (Grupowanie v2 - Fuzzy)
+   MANAGER UI
 ========================= */
 app.get("/manager", (req, res) => {
   const files = hostersOnly(ALL_DOWNLOADS_CACHE);
-  
-  // Grupowanie po "Znormalizowanym Kluczu"
   const groups = {};
   
   for (const f of files) {
-    const key = getNormalizedKey(f.filename); // Tu dzieje się magia (s3cret -> secret)
+    const key = getNormalizedKey(f.filename); 
     const displayTitle = getDisplayTitle(f.filename);
 
     if (!groups[key]) {
       groups[key] = {
         key: key,
-        displayName: displayTitle, // Pierwsza napotkana nazwa będzie nazwą grupy
+        displayName: displayTitle, 
         files: [],
         assignedId: null,
         poster: null,
@@ -118,7 +117,6 @@ app.get("/manager", (req, res) => {
     }
     groups[key].files.push(f);
     
-    // Pobieramy metadane z cache jeśli są
     if (METADATA_CACHE[f.id]) {
       groups[key].assignedId = METADATA_CACHE[f.id].id;
       groups[key].poster = METADATA_CACHE[f.id].poster;
@@ -126,7 +124,6 @@ app.get("/manager", (req, res) => {
     }
   }
 
-  // HTML
   let html = `
   <html>
   <head>
@@ -147,8 +144,8 @@ app.get("/manager", (req, res) => {
     </style>
   </head>
   <body>
-    <h1>🎬 Manager v2: Fuzzy Grouping</h1>
-    <p>Teraz "Secret" i "S3cret" powinny być w jednej grupie!</p>
+    <h1>🎬 Manager v3: Pancerne Fuzzy</h1>
+    <p>Teraz błędy sieciowe nie wyłączą wtyczki.</p>
   `;
 
   const sortedGroups = Object.values(groups).sort((a,b) => b.files.length - a.files.length);
@@ -181,29 +178,32 @@ app.get("/manager", (req, res) => {
   res.send(html);
 });
 
-// Endpoint aktualizacji (szuka po kluczu, nie po nazwie)
+// ZABEZPIECZONY Endpoint aktualizacji
 app.post("/manager/update-group", async (req, res) => {
   const { groupKey, imdbId } = req.body;
   
   if (imdbId && imdbId.startsWith("tt")) {
+    // Tutaj fetchCinemeta już ma try/catch, więc nie wywali serwera
     const meta = await fetchCinemeta(imdbId);
+    
     if (meta) {
-      console.log(`📦 [GROUP UPDATE] Przypisuję ID ${imdbId} do grupy klucza "${groupKey}"`);
-      
+      console.log(`📦 [GROUP UPDATE] Sukces! ${meta.name} -> "${groupKey}"`);
       const files = hostersOnly(ALL_DOWNLOADS_CACHE);
       for (const f of files) {
-        // Sprawdzamy, czy plik pasuje do klucza tej grupy
         if (getNormalizedKey(f.filename) === groupKey) {
           METADATA_CACHE[f.id] = meta;
         }
       }
+    } else {
+      console.log(`⚠️ [GROUP UPDATE] Nie znaleziono danych dla ID: ${imdbId}`);
     }
   }
+  // Zawsze przekieruj, nawet jak był błąd
   res.redirect("/manager");
 });
 
 /* =========================
-   CORE SYNC
+   CORE SYNC (PAGINATION)
 ========================= */
 async function syncAllDownloads() {
   if (isUpdating) return;
@@ -231,7 +231,7 @@ async function syncAllDownloads() {
     if (allItems.length > 0) {
       ALL_DOWNLOADS_CACHE = allItems;
     }
-  } catch (e) { console.error(e); } 
+  } catch (e) { console.error("Sync error:", e.message); } 
   finally { isUpdating = false; }
 }
 
@@ -240,9 +240,9 @@ async function syncAllDownloads() {
 ========================= */
 app.get("/manifest.json", (req, res) => {
   res.json({
-    id: "community.rd.smart.manager.v8",
-    version: "1.1.2",
-    name: "RD Manager (Fuzzy)",
+    id: "community.rd.smart.manager.v9",
+    version: "1.1.3",
+    name: "RD Manager (Stable)",
     description: "Group & Manage your RD files easily.",
     resources: ["stream", "catalog"],
     types: ["movie", "series"],
