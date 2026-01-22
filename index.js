@@ -4,7 +4,7 @@ import "dotenv/config";
 
 const app = express();
 
-// === CORS (Dostęp dla Stremio) ===
+// === CORS ===
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -24,7 +24,7 @@ if (!RD_TOKEN) {
 }
 
 /* =========================
-   CACHE & DATABASE
+   CACHE
 ========================= */
 let ALL_DOWNLOADS_CACHE = []; 
 let METADATA_CACHE = {}; 
@@ -34,10 +34,8 @@ let isUpdating = false;
    HELPERS
 ========================= */
 function deLeet(s) {
-  return String(s || "")
-    .replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e")
-    .replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t")
-    .replace(/@/g, "a");
+  return String(s || "").replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e")
+    .replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t").replace(/@/g, "a");
 }
 
 function getNormalizedKey(filename) {
@@ -67,28 +65,30 @@ function matchesEpisode(filename, season, episode) {
 }
 
 /* =========================
-   METADATA LOGIC (ZABEZPIECZONA)
+   METADATA LOGIC (POPRAWIONE ADRESY)
 ========================= */
 async function fetchCinemeta(idOrName) {
   if (!idOrName.startsWith("tt")) return null;
+  
+  // POPRAWKA: v3-cinemeta.strem.io (nie stremio.com)
+  const metaBase = "https://v3-cinemeta.strem.io";
 
   try {
-    // Próbujemy pobrać dane dla serialu
-    let r = await fetch(`https://v3-cinemeta.stremio.com/meta/series/${idOrName}.json`);
+    // 1. Sprawdzamy SERIES
+    let r = await fetch(`${metaBase}/meta/series/${idOrName}.json`);
     if (r.ok) {
       let j = await r.json();
       if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "series" };
     }
     
-    // Jeśli nie serial, to może film?
-    r = await fetch(`https://v3-cinemeta.stremio.com/meta/movie/${idOrName}.json`);
+    // 2. Sprawdzamy MOVIE
+    r = await fetch(`${metaBase}/meta/movie/${idOrName}.json`);
     if (r.ok) {
       let j = await r.json();
       if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "movie" };
     }
   } catch (err) {
-    console.error(`⚠️ Błąd Cinemeta dla ${idOrName}:`, err.message);
-    // Zwracamy null, ale NIE CRASHUJEMY serwera
+    console.error(`⚠️ Błąd sieci Cinemeta dla ${idOrName}:`, err.message);
     return null;
   }
   return null;
@@ -127,7 +127,7 @@ app.get("/manager", (req, res) => {
   let html = `
   <html>
   <head>
-    <title>RD Smart Manager</title>
+    <title>RD Manager</title>
     <style>
       body { font-family: sans-serif; background: #121212; color: #e0e0e0; padding: 20px; }
       .group-card { background: #1e1e1e; border: 1px solid #333; margin-bottom: 20px; padding: 15px; border-radius: 8px; display: flex; align-items: center; }
@@ -144,8 +144,8 @@ app.get("/manager", (req, res) => {
     </style>
   </head>
   <body>
-    <h1>🎬 Manager v3: Pancerne Fuzzy</h1>
-    <p>Teraz błędy sieciowe nie wyłączą wtyczki.</p>
+    <h1>🎬 Manager (Poprawiony adres API)</h1>
+    <p>Teraz pobierze poprawne plakaty z Cinemeta.</p>
   `;
 
   const sortedGroups = Object.values(groups).sort((a,b) => b.files.length - a.files.length);
@@ -166,28 +166,28 @@ app.get("/manager", (req, res) => {
         <div class="action">
           <form action="/manager/update-group" method="POST">
             <input type="hidden" name="groupKey" value="${g.key}">
-            <input type="text" name="imdbId" value="${currentId}" placeholder="np. tt9140554">
-            <button type="submit">Zapisz grupę</button>
+            <input type="text" name="imdbId" value="${currentId}" placeholder="np. tt10857164">
+            <button type="submit">Zapisz</button>
           </form>
         </div>
       </div>
     `;
   }
-
   html += `</body></html>`;
   res.send(html);
 });
 
-// ZABEZPIECZONY Endpoint aktualizacji
 app.post("/manager/update-group", async (req, res) => {
   const { groupKey, imdbId } = req.body;
   
   if (imdbId && imdbId.startsWith("tt")) {
-    // Tutaj fetchCinemeta już ma try/catch, więc nie wywali serwera
-    const meta = await fetchCinemeta(imdbId);
+    console.log(`📦 [UPDATE] Pobieram dane dla ${imdbId}...`);
+    
+    // Teraz to zadziała, bo adres jest poprawny
+    let meta = await fetchCinemeta(imdbId);
     
     if (meta) {
-      console.log(`📦 [GROUP UPDATE] Sukces! ${meta.name} -> "${groupKey}"`);
+      console.log(`✅ [SUCCESS] Znaleziono: ${meta.name}`);
       const files = hostersOnly(ALL_DOWNLOADS_CACHE);
       for (const f of files) {
         if (getNormalizedKey(f.filename) === groupKey) {
@@ -195,24 +195,21 @@ app.post("/manager/update-group", async (req, res) => {
         }
       }
     } else {
-      console.log(`⚠️ [GROUP UPDATE] Nie znaleziono danych dla ID: ${imdbId}`);
+      console.log(`⚠️ [FAIL] Nadal brak danych dla ${imdbId}, ale to dziwne.`);
     }
   }
-  // Zawsze przekieruj, nawet jak był błąd
   res.redirect("/manager");
 });
 
 /* =========================
-   CORE SYNC (PAGINATION)
+   CORE SYNC
 ========================= */
 async function syncAllDownloads() {
   if (isUpdating) return;
   isUpdating = true;
-  console.log("🔄 [SYNC] Pobieranie historii RD...");
   let page = 1; 
   let allItems = []; 
   let keepFetching = true;
-
   try {
     while (keepFetching) {
       const r = await fetch(`https://api.real-debrid.com/rest/1.0/downloads?limit=100&page=${page}`, {
@@ -228,9 +225,7 @@ async function syncAllDownloads() {
         await new Promise(r => setTimeout(r, 200));
       }
     }
-    if (allItems.length > 0) {
-      ALL_DOWNLOADS_CACHE = allItems;
-    }
+    if (allItems.length > 0) ALL_DOWNLOADS_CACHE = allItems;
   } catch (e) { console.error("Sync error:", e.message); } 
   finally { isUpdating = false; }
 }
@@ -240,9 +235,9 @@ async function syncAllDownloads() {
 ========================= */
 app.get("/manifest.json", (req, res) => {
   res.json({
-    id: "community.rd.smart.manager.v9",
-    version: "1.1.3",
-    name: "RD Manager (Stable)",
+    id: "community.rd.smart.manager.v11",
+    version: "1.1.5",
+    name: "RD Manager (Fixed)",
     description: "Group & Manage your RD files easily.",
     resources: ["stream", "catalog"],
     types: ["movie", "series"],
@@ -255,7 +250,6 @@ app.get("/catalog/:type/:id.json", (req, res) => {
   const metas = [];
   const files = hostersOnly(ALL_DOWNLOADS_CACHE);
   const unique = new Set();
-
   for (const f of files) {
     const meta = METADATA_CACHE[f.id];
     if (!meta || !meta.id.startsWith("tt") || meta.type !== req.params.type) continue;
@@ -276,14 +270,11 @@ app.get("/stream/:type/:id.json", (req, res) => {
   const { type, id } = req.params;
   const { baseId, season, episode } = parseSeasonEpisode(id);
   const streams = [];
-  
   for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
     if (meta && meta.id === baseId) {
       if (type === "series") {
-        if (matchesEpisode(f.filename, season, episode)) {
-             streams.push({ name: "MOJE RD", title: f.filename, url: f.download });
-        }
+        if (matchesEpisode(f.filename, season, episode)) streams.push({ name: "MOJE RD", title: f.filename, url: f.download });
       } else {
          streams.push({ name: "MOJE RD", title: f.filename, url: f.download });
       }
@@ -297,7 +288,6 @@ app.get("/stream/:type/:id.json", (req, res) => {
 ========================= */
 app.listen(PORT, "0.0.0.0", () => {
   console.log("✅ Server running.");
-  console.log(`👉 DASHBOARD: http://127.0.0.1:${PORT}/manager`);
   syncAllDownloads();
   setInterval(syncAllDownloads, 15 * 60 * 1000);
 });
