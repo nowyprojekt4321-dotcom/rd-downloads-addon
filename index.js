@@ -3,6 +3,16 @@ import fetch from "node-fetch";
 import "dotenv/config";
 
 const app = express();
+
+// === NAPRAWA: DODANO OBSŁUGĘ CORS ===
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  next();
+});
+// ====================================
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -31,19 +41,17 @@ function hostersOnly(downloads) {
 // Wyciąga "Nazwę Grupy" z pliku (np. z "Loki.S02E01.mkv" robi "Loki")
 function getGroupName(filename) {
   const clean = String(filename || "").replace(/\./g, " ").trim();
-  // Regex szukający wzorca S01, S02 itd.
   const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
   if (match && match[1]) {
-    return match[1].trim(); // Zwraca np. "Loki"
+    return match[1].trim();
   }
-  return clean; // Jeśli to film, zwraca całą nazwę
+  return clean;
 }
 
 function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
   const s = Number(season); 
   const e = Number(episode);
-  // Obsługa S01E01, 1x01, itp.
   const re = new RegExp(`S0*${s}[^0-9]*E0*${e}`, "i");
   const re2 = new RegExp(`\\b${s}x${e}\\b`, "i");
   return re.test(filename) || re2.test(filename);
@@ -53,7 +61,6 @@ function matchesEpisode(filename, season, episode) {
    METADATA LOGIC
 ========================= */
 async function fetchCinemeta(idOrName) {
-  // Jeśli podano ID (tt...)
   if (idOrName.startsWith("tt")) {
     let r = await fetch(`https://v3-cinemeta.stremio.com/meta/series/${idOrName}.json`);
     let j = await r.json();
@@ -64,7 +71,7 @@ async function fetchCinemeta(idOrName) {
     if (j?.meta) return { id: j.meta.imdb_id, name: j.meta.name, poster: j.meta.poster, type: "movie" };
     return null;
   }
-  return null; // Automatyczne szukanie pomijamy w tej wersji dla przejrzystości, polegamy na grupowaniu
+  return null;
 }
 
 /* =========================
@@ -89,7 +96,6 @@ app.get("/manager", (req, res) => {
     }
     groups[groupName].files.push(f);
     
-    // Sprawdź czy któryś plik w grupie ma już ID
     if (METADATA_CACHE[f.id]) {
       groups[groupName].assignedId = METADATA_CACHE[f.id].id;
       groups[groupName].poster = METADATA_CACHE[f.id].poster;
@@ -115,7 +121,6 @@ app.get("/manager", (req, res) => {
       input { background: #333; color: #fff; border: 1px solid #555; padding: 8px; border-radius: 4px; }
       button { background: #6c5ce7; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; }
       button:hover { background: #5649c0; }
-      a { color: #74b9ff; text-decoration: none; }
     </style>
   </head>
   <body>
@@ -128,8 +133,6 @@ app.get("/manager", (req, res) => {
   for (const g of sortedGroups) {
     const posterSrc = g.poster || "https://via.placeholder.com/60x90?text=?";
     const currentId = (g.assignedId && g.assignedId.startsWith("tt")) ? g.assignedId : "";
-    
-    // Lista plików w dymku (dla podglądu)
     const fileListHtml = g.files.map(f => `<div>📄 ${f.filename}</div>`).join("");
 
     html += `
@@ -163,8 +166,6 @@ app.post("/manager/update-group", async (req, res) => {
     const meta = await fetchCinemeta(imdbId);
     if (meta) {
       console.log(`📦 [GROUP UPDATE] Przypisuję ${meta.name} do grupy "${groupName}"`);
-      
-      // Znajdź wszystkie pliki z tej grupy i zaktualizuj im cache
       const files = hostersOnly(ALL_DOWNLOADS_CACHE);
       for (const f of files) {
         if (getGroupName(f.filename) === groupName) {
@@ -204,8 +205,6 @@ async function syncAllDownloads() {
     }
     if (allItems.length > 0) {
       ALL_DOWNLOADS_CACHE = allItems;
-      // Po restarcie serwera można tu spróbować odtworzyć METADATA_CACHE z bazy (gdybyśmy ją mieli),
-      // ale w wersji RAM musimy polegać na Managerze.
     }
   } catch (e) { console.error(e); } 
   finally { isUpdating = false; }
@@ -217,7 +216,7 @@ async function syncAllDownloads() {
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "community.rd.smart.manager.v7",
-    version: "1.1.0",
+    version: "1.1.1",
     name: "RD Smart Manager",
     description: "Group & Manage your RD files easily.",
     resources: ["stream", "catalog"],
@@ -256,7 +255,6 @@ app.get("/stream/:type/:id.json", (req, res) => {
   for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
     if (meta && meta.id === baseId) {
-      // Dla seriali dodatkowo sprawdzamy numer odcinka w nazwie pliku
       if (type === "series") {
         if (matchesEpisode(f.filename, season, episode)) {
              streams.push({ name: "MOJE RD", title: f.filename, url: f.download });
