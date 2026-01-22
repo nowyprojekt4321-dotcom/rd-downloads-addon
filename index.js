@@ -4,14 +4,13 @@ import "dotenv/config";
 
 const app = express();
 
-// === NAPRAWA: DODANO OBSŁUGĘ CORS ===
+// === WAŻNE: CORS (Naprawia błąd instalacji w Stremio) ===
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   next();
 });
-// ====================================
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -32,20 +31,40 @@ let METADATA_CACHE = {};
 let isUpdating = false;
 
 /* =========================
-   HELPERS
+   HELPERS (Normalizacja i De-Leet)
 ========================= */
-function hostersOnly(downloads) {
-  return downloads.filter(d => d.streamable === 1 && !d.link.includes("/d/"));
+
+// Zamienia leetspeak na tekst (3->e, 4->a, itp.)
+function deLeet(s) {
+  return String(s || "")
+    .replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e")
+    .replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t")
+    .replace(/@/g, "a");
 }
 
-// Wyciąga "Nazwę Grupy" z pliku (np. z "Loki.S02E01.mkv" robi "Loki")
-function getGroupName(filename) {
-  const clean = String(filename || "").replace(/\./g, " ").trim();
+// Czyści nazwę do "wspólnego mianownika"
+function getNormalizedKey(filename) {
+  const clean = String(filename || "")
+    .replace(/\./g, " ") // Kropki na spacje
+    .replace(/_/g, " "); // Podłogi na spacje
+
+  // Wyciągamy sam tytuł (przed S01, 2023, 1080p itp.)
+  const match = clean.match(/^(.+?)(?=\s+(s\d{2}|19\d{2}|20\d{2}|4k|1080p|720p))/i);
+  let rawTitle = match && match[1] ? match[1] : clean;
+
+  // DeLeet i małe litery
+  return deLeet(rawTitle).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Do wyświetlania ładnej nazwy w UI (bez ucinania za mocno)
+function getDisplayTitle(filename) {
+  const clean = String(filename || "").replace(/\./g, " ");
   const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
-  if (match && match[1]) {
-    return match[1].trim();
-  }
-  return clean;
+  return match && match[1] ? match[1].trim() : clean;
+}
+
+function hostersOnly(downloads) {
+  return downloads.filter(d => d.streamable === 1 && !d.link.includes("/d/"));
 }
 
 function matchesEpisode(filename, season, episode) {
@@ -75,35 +94,39 @@ async function fetchCinemeta(idOrName) {
 }
 
 /* =========================
-   MANAGER UI (Grupowanie)
+   MANAGER UI (Grupowanie v2 - Fuzzy)
 ========================= */
 app.get("/manager", (req, res) => {
   const files = hostersOnly(ALL_DOWNLOADS_CACHE);
   
-  // 1. GRUPOWANIE PLIKÓW
+  // Grupowanie po "Znormalizowanym Kluczu"
   const groups = {};
   
   for (const f of files) {
-    const groupName = getGroupName(f.filename);
-    if (!groups[groupName]) {
-      groups[groupName] = {
-        name: groupName,
+    const key = getNormalizedKey(f.filename); // Tu dzieje się magia (s3cret -> secret)
+    const displayTitle = getDisplayTitle(f.filename);
+
+    if (!groups[key]) {
+      groups[key] = {
+        key: key,
+        displayName: displayTitle, // Pierwsza napotkana nazwa będzie nazwą grupy
         files: [],
         assignedId: null,
         poster: null,
         detectedName: null
       };
     }
-    groups[groupName].files.push(f);
+    groups[key].files.push(f);
     
+    // Pobieramy metadane z cache jeśli są
     if (METADATA_CACHE[f.id]) {
-      groups[groupName].assignedId = METADATA_CACHE[f.id].id;
-      groups[groupName].poster = METADATA_CACHE[f.id].poster;
-      groups[groupName].detectedName = METADATA_CACHE[f.id].name;
+      groups[key].assignedId = METADATA_CACHE[f.id].id;
+      groups[key].poster = METADATA_CACHE[f.id].poster;
+      groups[key].detectedName = METADATA_CACHE[f.id].name;
     }
   }
 
-  // 2. GENEROWANIE HTML
+  // HTML
   let html = `
   <html>
   <head>
@@ -124,8 +147,8 @@ app.get("/manager", (req, res) => {
     </style>
   </head>
   <body>
-    <h1>🎬 Twój Inteligentny Manager</h1>
-    <p>System automatycznie pogrupował Twoje pliki. Przypisz ID do grupy, a zadziała dla wszystkich odcinków.</p>
+    <h1>🎬 Manager v2: Fuzzy Grouping</h1>
+    <p>Teraz "Secret" i "S3cret" powinny być w jednej grupie!</p>
   `;
 
   const sortedGroups = Object.values(groups).sort((a,b) => b.files.length - a.files.length);
@@ -139,15 +162,15 @@ app.get("/manager", (req, res) => {
       <div class="group-card">
         <img src="${posterSrc}" class="poster">
         <div class="info">
-          <div class="title">${g.detectedName || g.name}</div>
+          <div class="title">${g.detectedName || g.displayName}</div>
           <div class="files-count">Plików w grupie: <strong>${g.files.length}</strong></div>
           <div class="files-list">${fileListHtml}</div>
         </div>
         <div class="action">
           <form action="/manager/update-group" method="POST">
-            <input type="hidden" name="groupName" value="${g.name}">
+            <input type="hidden" name="groupKey" value="${g.key}">
             <input type="text" name="imdbId" value="${currentId}" placeholder="np. tt9140554">
-            <button type="submit">Zapisz dla całej grupy</button>
+            <button type="submit">Zapisz grupę</button>
           </form>
         </div>
       </div>
@@ -158,17 +181,19 @@ app.get("/manager", (req, res) => {
   res.send(html);
 });
 
-// Endpoint grupowy
+// Endpoint aktualizacji (szuka po kluczu, nie po nazwie)
 app.post("/manager/update-group", async (req, res) => {
-  const { groupName, imdbId } = req.body;
+  const { groupKey, imdbId } = req.body;
   
   if (imdbId && imdbId.startsWith("tt")) {
     const meta = await fetchCinemeta(imdbId);
     if (meta) {
-      console.log(`📦 [GROUP UPDATE] Przypisuję ${meta.name} do grupy "${groupName}"`);
+      console.log(`📦 [GROUP UPDATE] Przypisuję ID ${imdbId} do grupy klucza "${groupKey}"`);
+      
       const files = hostersOnly(ALL_DOWNLOADS_CACHE);
       for (const f of files) {
-        if (getGroupName(f.filename) === groupName) {
+        // Sprawdzamy, czy plik pasuje do klucza tej grupy
+        if (getNormalizedKey(f.filename) === groupKey) {
           METADATA_CACHE[f.id] = meta;
         }
       }
@@ -215,9 +240,9 @@ async function syncAllDownloads() {
 ========================= */
 app.get("/manifest.json", (req, res) => {
   res.json({
-    id: "community.rd.smart.manager.v7",
-    version: "1.1.1",
-    name: "RD Smart Manager",
+    id: "community.rd.smart.manager.v8",
+    version: "1.1.2",
+    name: "RD Manager (Fuzzy)",
     description: "Group & Manage your RD files easily.",
     resources: ["stream", "catalog"],
     types: ["movie", "series"],
