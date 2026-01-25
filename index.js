@@ -65,9 +65,13 @@ async function getCatalog(type, catalogId) {
     
     // FIX: Pobieramy 2 strony, żeby katalogi nie były puste
     let allResults = [];
-    for (let i = 1; i <= 2; i++) {
+    for (let i = 1; i <= 10; i++) { // <--- ZMIENIŁEM 2 NA 10
         const data = await fetchTMDB(endpoint, `${params}&page=${i}`);
-        if (data && data.results) allResults = allResults.concat(data.results);
+        if (data && data.results) {
+            allResults = allResults.concat(data.results);
+        } else {
+            break; // Jak braknie stron, przerywamy wcześniej
+        }
     }
 
     return allResults.map(item => ({
