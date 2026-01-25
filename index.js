@@ -282,47 +282,25 @@ app.get("/manager", (req, res) => {
 function renderGrid(type, groups, showHidden, viewMode, isActive) {
     let html = `<div id="grid-${viewMode}-${type}" class="grid-container ${isActive ? 'active' : ''}">`;
     const sorted = Object.values(groups).filter(g => g.type === type).sort((a,b) => { if (!a.assignedId && b.assignedId) return -1; if (a.assignedId && !b.assignedId) return 1; return b.files.length - a.files.length; });
-    
     for (const g of sorted) {
         if (HIDDEN_GROUPS.has(g.key) && !showHidden) continue;
         const posterSrc = g.poster ? `<img src="${g.poster}" class="poster-img">` : `<div class="no-poster"><span class="icon" style="font-size:40px">image_not_supported</span></div>`;
         const currentId = (g.assignedId && g.assignedId.startsWith("tt")) ? g.assignedId : "";
         
-        // Czyste wyszukiwanie
+        // FIX: Używamy funkcji getSearchQuery
         const searchUrl = `https://www.imdb.com/find?q=${encodeURIComponent(getSearchQuery(g.displayName))}`;
         
         const cardClass = HIDDEN_GROUPS.has(g.key) ? "card hidden-item" : "card";
         const filesEncoded = encodeURIComponent(JSON.stringify(g.files.map(f => f.filename)));
         const safeTitle = g.detectedName || g.displayName;
         const downloadIds = g.files.map(f => f.id).join(",");
-        
         let statusHtml = "";
-        // Statusy dla Torrentów ORAZ przetwarzanych plików Rapidgator
         if (g.isTorrent || (g.streamable !== 1 && !g.isTorrent)) {
             let color = "#10b981"; let text = "GOTOWE";
-            if (g.isTorrent) { 
-                if (g.status === 'downloading') { color = "#f59e0b"; text = `POBIERANIE ${g.progress || 0}%`; } 
-                else if (g.status === 'magnet_conversion') { color = "#8b5cf6"; text = "KONWERSJA"; } 
-            } else { 
-                color = "#f59e0b"; text = "PRZETWARZANIE..."; 
-            }
+            if (g.isTorrent) { if (g.status === 'downloading') { color = "#f59e0b"; text = `POBIERANIE ${g.progress || 0}%`; } else if (g.status === 'magnet_conversion') { color = "#8b5cf6"; text = "KONWERSJA"; } } else { color = "#f59e0b"; text = "PRZETWARZANIE..."; }
             statusHtml = `<div class="status-text" style="color:${color}">${text}</div>`;
         }
-
-        html += `
-          <div class="${cardClass}" data-title="${safeTitle}">
-            <div class="poster-area" onclick="showDetails('${safeTitle.replace(/'/g, "\\'")}', '${filesEncoded}')">
-                ${posterSrc}<div class="badge"><span class="icon" style="font-size:14px">folder</span> ${g.files.length}</div><div class="size-badge">${formatBytes(g.size)}</div></div>
-            <div class="content">
-              <div class="title" onclick="showDetails('${safeTitle.replace(/'/g, "\\'")}', '${filesEncoded}')">${safeTitle}</div>
-              ${statusHtml}
-              <a href="${searchUrl}" target="_blank" class="btn-imdb"><span class="icon" style="font-size:16px">search</span> Szukaj ID</a>
-              <form action="/manager/update-group" method="POST" style="margin:0;"><input type="hidden" name="groupKey" value="${g.key}"><div class="input-row"><input type="text" name="imdbId" value="${currentId}" placeholder="tt..."><button type="submit" class="btn-icon-only"><span class="icon">save</span></button></div></form>
-              <div style="display:flex; gap:5px; margin-top:5px;">
-                  <form action="/manager/toggle-hide" method="POST" style="margin:0; flex:1;"><input type="hidden" name="groupKey" value="${g.key}">${HIDDEN_GROUPS.has(g.key) ? `<button type="submit" class="btn-restore"><span class="icon">undo</span></button>` : `<button type="submit" class="btn-delete" style="color:#888; border-color:#444"><span class="icon">visibility_off</span></button>`}</form>
-                  <form action="/manager/delete-rd" method="POST" style="margin:0; flex:1;" onsubmit="return confirmDelete()"><input type="hidden" name="downloadIds" value="${downloadIds}"><button type="submit" class="btn-delete"><span class="icon">delete</span></button></form>
-              </div>
-            </div></div>`;
+        html += `<div class="${cardClass}" data-title="${safeTitle}"><div class="poster-area" onclick="showDetails('${safeTitle.replace(/'/g, "\\'")}', '${filesEncoded}')">${posterSrc}<div class="badge"><span class="icon" style="font-size:14px">folder</span> ${g.files.length}</div><div class="size-badge">${formatBytes(g.size)}</div></div><div class="content"><div class="title" onclick="showDetails('${safeTitle.replace(/'/g, "\\'")}', '${filesEncoded}')">${safeTitle}</div>${statusHtml}<a href="${searchUrl}" target="_blank" class="btn-imdb"><span class="icon" style="font-size:16px">search</span> Szukaj ID</a><form action="/manager/update-group" method="POST" style="margin:0;"><input type="hidden" name="groupKey" value="${g.key}"><div class="input-row"><input type="text" name="imdbId" value="${currentId}" placeholder="tt..."><button type="submit" class="btn-icon-only"><span class="icon">save</span></button></div></form><div style="display:flex; gap:5px; margin-top:5px;"><form action="/manager/toggle-hide" method="POST" style="margin:0; flex:1;"><input type="hidden" name="groupKey" value="${g.key}">${HIDDEN_GROUPS.has(g.key) ? `<button type="submit" class="btn-restore"><span class="icon">undo</span></button>` : `<button type="submit" class="btn-delete" style="color:#888; border-color:#444"><span class="icon">visibility_off</span></button>`}</form><form action="/manager/delete-rd" method="POST" style="margin:0; flex:1;" onsubmit="return confirmDelete()"><input type="hidden" name="downloadIds" value="${downloadIds}"><button type="submit" class="btn-delete"><span class="icon">delete</span></button></form></div></div></div>`;
     }
     return html + `</div>`;
 }
@@ -407,6 +385,68 @@ async function syncAllDownloads() {
     ALL_TORRENTS_CACHE = detailedTorrents;
   } catch (e) { console.error("Sync error:", e.message); } finally { isUpdating = false; }
 }
+
+// === STREMIO MANIFEST & ROUTES ===
+app.get("/manifest.json", (req, res) => {
+  res.json({
+    id: "community.rd.manager.final",
+    version: "14.1.0",
+    name: "RDD ULTIMATE",
+    description: "VOD Manager + PL",
+    logo: "https://ds-addon.onrender.com/assets/logo.png",
+    resources: ["stream", "catalog", "meta"],
+    types: ["movie", "series"],
+    idPrefixes: ["tt", "tmdb"],
+    catalogs: [
+        { type: "series", id: "rd_series", name: "💎 Moje Seriale", extraSupported: ["skip"] }, 
+        { type: "movie", id: "rd_movies", name: "💎 Moje Filmy", extraSupported: ["skip"] },
+        { type: "movie", id: "trending", name: "🔥 Popularne", extraSupported: ["skip"] },
+        { type: "series", id: "trending", name: "🔥 Popularne", extraSupported: ["skip"] },
+        { type: "movie", id: "netflix", name: "🔴 Netflix", extraSupported: ["skip"] },
+        { type: "series", id: "netflix", name: "🔴 Netflix", extraSupported: ["skip"] },
+        { type: "movie", id: "hbo", name: "🟣 HBO Max", extraSupported: ["skip"] },
+        { type: "series", id: "hbo", name: "🟣 HBO Max", extraSupported: ["skip"] },
+        { type: "movie", id: "disney", name: "🟢 Disney+", extraSupported: ["skip"] },
+        { type: "series", id: "disney", name: "🟢 Disney+", extraSupported: ["skip"] },
+        { type: "movie", id: "amazon", name: "🔵 Prime Video", extraSupported: ["skip"] },
+        { type: "series", id: "amazon", name: "🔵 Prime Video", extraSupported: ["skip"] },
+        { type: "movie", id: "apple", name: "🍏 Apple TV+", extraSupported: ["skip"] }
+    ]
+  });
+});
+
+async function handleCatalog(req, res) {
+    const { type, id, extra } = req.params;
+    let skip = 0;
+    if (extra) { const match = extra.match(/skip=(\d+)/); if (match) skip = parseInt(match[1]); }
+
+    if (id === "rd_series" || id === "rd_movies") {
+        const metas = [];
+        const files = hostersOnly(ALL_DOWNLOADS_CACHE); 
+        const unique = new Set();
+        for (const f of files) {
+            const key = getNormalizedKey(f.filename);
+            if (HIDDEN_GROUPS.has(key)) continue;
+            const meta = METADATA_CACHE[f.id];
+            if (!meta || !meta.id.startsWith("tt") || meta.type !== type) continue;
+            if (!unique.has(meta.id)) { unique.add(meta.id); metas.push({ id: meta.id, type: meta.type, name: meta.name, poster: meta.poster }); }
+        }
+        for (const t of ALL_TORRENTS_CACHE) {
+            if (t.status !== 'downloaded') continue;
+            const key = getNormalizedKey(t.filename);
+            if (HIDDEN_GROUPS.has(key)) continue;
+            const meta = METADATA_CACHE[t.id];
+            if (!meta || !meta.id.startsWith("tt") || meta.type !== type) continue;
+            if (!unique.has(meta.id)) { unique.add(meta.id); metas.push({ id: meta.id, type: meta.type, name: meta.name, poster: meta.poster }); }
+        }
+        return res.json({ metas: metas.slice(0, 100) });
+    }
+    const items = await getCatalog(type, id, skip);
+    res.json({ metas: items });
+}
+
+app.get("/catalog/:type/:id.json", handleCatalog);
+app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 
 app.get("/meta/:type/:id.json", async (req, res) => {
     const { type, id } = req.params;
