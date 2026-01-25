@@ -155,7 +155,7 @@ app.get("/manager", (req, res) => {
   let html = `
   <html>
   <head>
-    <title>RD Manager</title>
+    <title>RDD ULTIMATE</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"> 
     <link rel="icon" type="image/png" href="/assets/fav.png">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
@@ -491,7 +491,7 @@ app.get("/manifest.json", (req, res) => {
   res.json({
     id: "community.rd.manager.final",
     version: "1.0.0",
-    name: "RD Manager",
+    name: "RDD ULTIMATE",
     description: "VOD Manager.",
     logo: "https://ds-addon.onrender.com/assets/logo.png",
     resources: ["stream", "catalog"],
