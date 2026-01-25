@@ -393,7 +393,7 @@ app.get("/manifest.json", (req, res) => {
     version: "14.1.0",
     name: "RDD ULTIMATE",
     description: "VOD Manager + PL",
-    logo: "https://ds-addon.onrender.com/assets/logo.png",
+    logo: "https://rd-downloads-addon.onrender.com/assets/logo.png",
     resources: ["stream", "catalog", "meta"],
     types: ["movie", "series"],
     idPrefixes: ["tt", "tmdb"],
