@@ -89,54 +89,53 @@ function formatReleaseDate(dateStr) {
 }
 
 /* =========================
-   CATALOG LOGIC (v15.2 QUALITY FILTER)
+   CATALOG LOGIC (v15.3 PREMIERES ENGINE)
 ========================= */
 async function getCatalog(catalogId, type, genre, skip = 0) {
     let results = [];
     const regionParams = "&watch_region=PL&region=PL";
     const page = Math.floor(skip / 20) + 1;
 
-    // --- 1. SEKCJA "W TYM MIESIĄCU" (MIXED & FILTERED) ---
+    // --- 1. SEKCJA "PREMIERY" (DAWNIEJ W TYM MIESIĄCU) ---
+    // Logika: Pokaż wszystko co nowe (Kino + VOD), sortuj od najnowszych, scrolluj w nieskończoność.
     if (catalogId === "this_month") {
         const now = new Date();
-        // Pobieramy od początku tego miesiąca do końca przyszłego
-        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-        const lastDay = new Date(now.getFullYear(), now.getMonth() + 2, 0).toISOString().split('T')[0];
+        // Ustawiamy limit górny na "za 3 miesiące" (żeby widzieć nadchodzące hity kinowe)
+        const futureDate = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString().split('T')[0];
 
-        // ZMIANA: Sortujemy po POPULARNOŚCI (popularity.desc) wewnątrz tego zakresu dat.
-        // Dodatkowo: vote_count.gte=5 wycina totalne śmieci, które nie mają żadnych głosów.
+        // Sortowanie po DACIE (Najnowsze), ale z filtrem popularności żeby nie było śmieci bez opisów
+        // vote_count.gte=2 pozwala wyłapać nowości, które mają chociaż 2 głosy (czyli istnieją)
         const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `primary_release_date.gte=${firstDay}&primary_release_date.lte=${lastDay}&sort_by=popularity.desc&vote_count.gte=5&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `first_air_date.gte=${firstDay}&first_air_date.lte=${lastDay}&sort_by=popularity.desc&vote_count.gte=5&page=${page}${regionParams}`)
+            fetchTMDB("/discover/movie", `primary_release_date.lte=${futureDate}&sort_by=primary_release_date.desc&vote_count.gte=2&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `first_air_date.lte=${futureDate}&sort_by=first_air_date.desc&vote_count.gte=2&page=${page}${regionParams}`)
         ]);
 
         let mixed = [];
         if (movies?.results) mixed.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
         if (series?.results) mixed.push(...series.results.map(i => ({...i, media_type: 'tv'})));
 
-        // Ponownie sortujemy wynikowy mix po popularności (bo łączymy dwie różne listy)
-        results = mixed.sort((a,b) => b.popularity - a.popularity);
+        // Sortujemy mix po dacie (Najnowsze na górze)
+        results = mixed.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
     } 
 
-    // --- 2. SEKCJA PREMIUM NOWOŚCI (FILTERED) ---
+    // --- 2. SEKCJA PREMIUM NOWOŚCI ---
     else if (catalogId.endsWith("_new")) {
         const [providerName] = catalogId.split("_");
         const providerId = PROVIDERS[providerName];
         
-        // Tutaj też zmieniamy na popularity.desc, żeby na górze były hity Netflixa, a nie indyjskie opery mydlane dodane przed chwilą.
         const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=popularity.desc&primary_release_date.gte=2024-01-01&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=popularity.desc&first_air_date.gte=2024-01-01&page=${page}${regionParams}`)
+            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=primary_release_date.desc&vote_count.gte=5&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=first_air_date.desc&vote_count.gte=5&page=${page}${regionParams}`)
         ]);
 
         let mixed = [];
         if (movies?.results) mixed.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
         if (series?.results) mixed.push(...series.results.map(i => ({...i, media_type: 'tv'})));
 
-        results = mixed.sort((a,b) => b.popularity - a.popularity);
+        results = mixed.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
     }
 
-    // --- 3. SEKCJA PREMIUM ZWYKŁA (FILMY lub SERIALE) ---
+    // --- 3. SEKCJA PREMIUM ZWYKŁA ---
     else if (PROVIDERS[catalogId.split("_")[0]]) {
         const [providerName, subType] = catalogId.split("_");
         const providerId = PROVIDERS[providerName];
@@ -167,23 +166,31 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         const isMovie = item.media_type === 'movie';
         const date = item.release_date || item.first_air_date;
         const year = (date || "").substring(0, 4);
-        const typeTag = isMovie ? 'F' : 'S'; 
         
         let name = item.title || item.name;
 
-        // FORMATOWANIE 1: W TYM MIESIĄCU -> Tytuł [PROVIDER-TYP]
+        // TAGOWANIE (LOGIKA PREMIER)
         if (catalogId === "this_month") {
-            const isFuture = new Date(date) > new Date();
-            // Prosta logika: Przyszłość = KINO, Przeszłość = VOD/TV
-            // (Można tu w przyszłości dodać sprawdzanie providerów, ale to kosztuje dodatkowe zapytania API)
-            const providerTag = isFuture ? "KINO" : "VOD"; 
+            const releaseDate = new Date(date);
+            const now = new Date();
+            const diffDays = (releaseDate - now) / (1000 * 60 * 60 * 24);
+
+            let tag = "";
+            if (diffDays > 0) {
+                tag = "WKRÓTCE"; // Przyszłość
+            } else if (diffDays > -90 && isMovie) {
+                // Filmy z ostatnich 3 miesięcy traktujemy jako KINO (bo zwykle tam są zanim trafią na VOD)
+                // Uwaga: To przybliżenie, bo nie znamy dokładnego dostawcy w tym widoku
+                tag = "KINO"; 
+            } else {
+                // Starsze produkcje
+                tag = isMovie ? "FILM" : "SERIAL";
+            }
             
-            // ZMIANA: Usunięto [TERAZ]/[WKRÓTCE] z początku. Tylko suffix na końcu.
-            name = `${name} [${providerTag}-${typeTag}]`;
+            name = `${name} [${tag}]`;
         } 
-        // FORMATOWANIE 2: NOWOŚCI DOSTAWCÓW -> Tytuł (TYP)
         else if (catalogId.endsWith("_new")) {
-            name = `${name} (${typeTag})`;
+            name = `${name} (${isMovie ? 'F' : 'S'})`;
         }
 
         return {
@@ -191,7 +198,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
             type: isMovie ? 'movie' : 'series',
             name: name,
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            // Fallback opisu: Jeśli brak PL, wstawiamy pusty string (Stremio lepiej to znosi niż undefined)
             description: item.overview || "", 
             releaseInfo: formatReleaseDate(date)
         };
@@ -496,7 +502,7 @@ app.get("/manifest.json", (req, res) => {
             
             // W TYM MIESIĄCU (JEDEN SUPER-KATALOG MIX)
             // Definiujemy jako 'movie', ale wsadzimy tu też seriale
-            { type: "movie", id: "this_month", name: "◢◤W TYM MIESIĄCU", extraSupported: ["skip"] },
+            { type: "movie", id: "this_month", name: "◢◤PREMIERY", extraSupported: ["skip"] },
 
             // PREMIUM 3x3 (NETFLIX)
             { type: "movie", id: "netflix_movies", name: "◢◤NETFLIX", extraSupported: ["skip", "genre"] },
