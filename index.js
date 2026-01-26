@@ -203,7 +203,7 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
 }
 
 /* =========================
-   META HANDLER (NAPRAWA SERIALI)
+   META HANDLER (NAPRAWA SERIALI + ID DLA INNYCH WTYCZEK)
 ========================= */
 async function getMetaFromTMDB(tmdbId, type) {
     const tmdbType = type === 'series' ? 'tv' : 'movie';
@@ -213,8 +213,12 @@ async function getMetaFromTMDB(tmdbId, type) {
     const data = await fetchTMDB(`/${tmdbType}/${id}`, "append_to_response=external_ids");
     if (!data) return null;
 
+    // Ustalamy "Główne ID" - jeśli mamy IMDb (tt...), to go używamy. Jak nie, to TMDB.
+    // To jest kluczowe dla AIO|PL i innych wtyczek.
+    const realId = data.external_ids?.imdb_id || `tmdb:${id}`;
+
     const meta = {
-        id: data.external_ids?.imdb_id || `tmdb:${id}`,
+        id: realId,
         tmdb_id: id,
         type: type,
         name: data.title || data.name,
@@ -228,10 +232,9 @@ async function getMetaFromTMDB(tmdbId, type) {
     // 🚨 LOGIKA SERIALI - POBIERANIE ODCINKÓW 🚨
     if (type === 'series' && data.seasons) {
         meta.videos = [];
-        // Pobieramy szczegóły dla każdego sezonu (ograniczamy do pierwszych 5 żeby było szybciej, lub wszystkich)
-        // Uwaga: TMDB wymaga osobnego zapytania dla każdego sezonu.
+        // Pobieramy szczegóły dla każdego sezonu
         const seasonPromises = data.seasons
-            .filter(s => s.season_number > 0) // Pomijamy specjały (sezon 0)
+            .filter(s => s.season_number > 0)
             .map(s => fetchTMDB(`/tv/${id}/season/${s.season_number}`));
         
         const seasonsData = await Promise.all(seasonPromises);
@@ -240,7 +243,9 @@ async function getMetaFromTMDB(tmdbId, type) {
             if (season && season.episodes) {
                 season.episodes.forEach(ep => {
                     meta.videos.push({
-                        id: `tmdb:${id}:${season.season_number}:${ep.episode_number}`,
+                        // TU BYŁ BŁĄD: Wcześniej dawaliśmy `tmdb:${id}...`
+                        // TERAZ: Dajemy `realId` (czyli tt12345...), jeśli jest dostępne.
+                        id: `${realId}:${season.season_number}:${ep.episode_number}`,
                         title: ep.name,
                         released: new Date(ep.air_date).toISOString(),
                         season: season.season_number,
