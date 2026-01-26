@@ -89,25 +89,29 @@ function formatReleaseDate(dateStr) {
 }
 
 /* =========================
-   CATALOG LOGIC (v15.3 PREMIERES ENGINE)
+   CATALOG LOGIC (v15.5 SMART VOTE FILTER)
 ========================= */
 async function getCatalog(catalogId, type, genre, skip = 0) {
     let results = [];
     const regionParams = "&watch_region=PL&region=PL";
     const page = Math.floor(skip / 20) + 1;
 
-    // --- 1. SEKCJA "PREMIERY" (DAWNIEJ W TYM MIESIĄCU) ---
-    // Logika: Pokaż wszystko co nowe (Kino + VOD), sortuj od najnowszych, scrolluj w nieskończoność.
+    // --- 1. SEKCJA "PREMIERY" (MIX FILMY + SERIALE) ---
     if (catalogId === "this_month") {
         const now = new Date();
-        // Ustawiamy limit górny na "za 3 miesiące" (żeby widzieć nadchodzące hity kinowe)
+        // Limit górny: +3 miesiące (widzimy przyszłość)
         const futureDate = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString().split('T')[0];
 
-        // Sortowanie po DACIE (Najnowsze), ale z filtrem popularności żeby nie było śmieci bez opisów
-        // vote_count.gte=2 pozwala wyłapać nowości, które mają chociaż 2 głosy (czyli istnieją)
+        // KONFIGURACJA FILTRÓW:
+        // 1. vote_count.gte=50 -> TO JEST KLUCZ. Wywala amatorskie produkcje i błędy bazy danych.
+        //    Prawdziwe hity kinowe (nawet przed premierą) mają dużo głosów "Want to see".
+        // 2. Sortowanie po dacie -> Żebyś widział co wychodzi TERAZ.
+        const filters = `primary_release_date.lte=${futureDate}&sort_by=primary_release_date.desc&vote_count.gte=50`;
+        const tvFilters = `first_air_date.lte=${futureDate}&sort_by=first_air_date.desc&vote_count.gte=50`;
+
         const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `primary_release_date.lte=${futureDate}&sort_by=primary_release_date.desc&vote_count.gte=2&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `first_air_date.lte=${futureDate}&sort_by=first_air_date.desc&vote_count.gte=2&page=${page}${regionParams}`)
+            fetchTMDB("/discover/movie", `${filters}&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `${tvFilters}&page=${page}${regionParams}`)
         ]);
 
         let mixed = [];
@@ -123,9 +127,10 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         const [providerName] = catalogId.split("_");
         const providerId = PROVIDERS[providerName];
         
+        // Tu też filtrujemy (min 20 głosów dla streamingów, bo tam czasem wychodzą niszowe rzeczy szybciej)
         const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=primary_release_date.desc&vote_count.gte=5&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=first_air_date.desc&vote_count.gte=5&page=${page}${regionParams}`)
+            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=primary_release_date.desc&vote_count.gte=20&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=first_air_date.desc&vote_count.gte=20&page=${page}${regionParams}`)
         ]);
 
         let mixed = [];
@@ -169,28 +174,21 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         
         let name = item.title || item.name;
 
-        // TAGOWANIE (LOGIKA PREMIER)
+        // TAGI (CZYSTE I PROSTE)
         if (catalogId === "this_month") {
             const releaseDate = new Date(date);
-            const now = new Date();
-            const diffDays = (releaseDate - now) / (1000 * 60 * 60 * 24);
-
+            const now = new Date(); 
+            
             let tag = "";
-            if (diffDays > 0) {
-                tag = "WKRÓTCE"; // Przyszłość
-            } else if (diffDays > -90 && isMovie) {
-                // Filmy z ostatnich 3 miesięcy traktujemy jako KINO (bo zwykle tam są zanim trafią na VOD)
-                // Uwaga: To przybliżenie, bo nie znamy dokładnego dostawcy w tym widoku
-                tag = "KINO"; 
+            if (releaseDate > now) {
+                tag = "WKRÓTCE";
             } else {
-                // Starsze produkcje
                 tag = isMovie ? "FILM" : "SERIAL";
             }
-            
             name = `${name} [${tag}]`;
         } 
         else if (catalogId.endsWith("_new")) {
-            name = `${name} (${isMovie ? 'F' : 'S'})`;
+            name = `${name} [${isMovie ? 'FILM' : 'SERIAL'}]`;
         }
 
         return {
