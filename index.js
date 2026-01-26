@@ -89,53 +89,51 @@ function formatReleaseDate(dateStr) {
 }
 
 /* =========================
-   CATALOG LOGIC (v15.1 MIXED ENGINE)
+   CATALOG LOGIC (v15.2 QUALITY FILTER)
 ========================= */
 async function getCatalog(catalogId, type, genre, skip = 0) {
     let results = [];
     const regionParams = "&watch_region=PL&region=PL";
-    // Obliczamy stronę dla TMDB (Stremio skipuje co 20, TMDB ma strony po 20)
     const page = Math.floor(skip / 20) + 1;
 
-    // --- 1. SEKCJA "W TYM MIESIĄCU" (MIXED) ---
+    // --- 1. SEKCJA "W TYM MIESIĄCU" (MIXED & FILTERED) ---
     if (catalogId === "this_month") {
-        // Obliczamy zakres dat obecnego miesiąca
         const now = new Date();
+        // Pobieramy od początku tego miesiąca do końca przyszłego
         const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-        const lastDay = new Date(now.getFullYear(), now.getMonth() + 2, 0).toISOString().split('T')[0]; // Pobieramy też przyszły miesiąc dla "Wkrótce"
+        const lastDay = new Date(now.getFullYear(), now.getMonth() + 2, 0).toISOString().split('T')[0];
 
-        // Pobieramy Filmy i Seriale z tego zakresu dat (Discover = Działa Paginacja!)
+        // ZMIANA: Sortujemy po POPULARNOŚCI (popularity.desc) wewnątrz tego zakresu dat.
+        // Dodatkowo: vote_count.gte=5 wycina totalne śmieci, które nie mają żadnych głosów.
         const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `primary_release_date.gte=${firstDay}&primary_release_date.lte=${lastDay}&sort_by=primary_release_date.desc&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `first_air_date.gte=${firstDay}&first_air_date.lte=${lastDay}&sort_by=first_air_date.desc&page=${page}${regionParams}`)
+            fetchTMDB("/discover/movie", `primary_release_date.gte=${firstDay}&primary_release_date.lte=${lastDay}&sort_by=popularity.desc&vote_count.gte=5&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `first_air_date.gte=${firstDay}&first_air_date.lte=${lastDay}&sort_by=popularity.desc&vote_count.gte=5&page=${page}${regionParams}`)
         ]);
 
-        // Mieszamy wyniki
         let mixed = [];
         if (movies?.results) mixed.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
         if (series?.results) mixed.push(...series.results.map(i => ({...i, media_type: 'tv'})));
 
-        // Sortujemy mix po dacie (od najnowszych)
-        results = mixed.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
+        // Ponownie sortujemy wynikowy mix po popularności (bo łączymy dwie różne listy)
+        results = mixed.sort((a,b) => b.popularity - a.popularity);
     } 
 
-    // --- 2. SEKCJA PREMIUM NOWOŚCI (MIXED: NETFLIX_NEW itp.) ---
+    // --- 2. SEKCJA PREMIUM NOWOŚCI (FILTERED) ---
     else if (catalogId.endsWith("_new")) {
         const [providerName] = catalogId.split("_");
         const providerId = PROVIDERS[providerName];
         
-        // Pobieramy nowości filmowe i serialowe od danego dostawcy
+        // Tutaj też zmieniamy na popularity.desc, żeby na górze były hity Netflixa, a nie indyjskie opery mydlane dodane przed chwilą.
         const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=primary_release_date.desc&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=first_air_date.desc&page=${page}${regionParams}`)
+            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=popularity.desc&primary_release_date.gte=2024-01-01&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=popularity.desc&first_air_date.gte=2024-01-01&page=${page}${regionParams}`)
         ]);
 
         let mixed = [];
         if (movies?.results) mixed.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
         if (series?.results) mixed.push(...series.results.map(i => ({...i, media_type: 'tv'})));
 
-        // Sortujemy mix
-        results = mixed.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
+        results = mixed.sort((a,b) => b.popularity - a.popularity);
     }
 
     // --- 3. SEKCJA PREMIUM ZWYKŁA (FILMY lub SERIALE) ---
@@ -144,7 +142,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         const providerId = PROVIDERS[providerName];
         const tmdbType = (subType === 'series' || type === 'series') ? 'tv' : 'movie';
         
-        // Opcjonalne filtrowanie po gatunku
         let genreParam = "";
         if (genre) {
             const genreObj = Object.entries(GENRES).find(([k,v]) => k === genre.toLowerCase() || k === genre);
@@ -153,7 +150,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
 
         const data = await fetchTMDB(`/discover/${tmdbType}`, `with_watch_providers=${providerId}&sort_by=popularity.desc${genreParam}&page=${page}${regionParams}`);
         results = data?.results || [];
-        // Oznaczamy typ ręcznie, bo discover/movie nie zwraca media_type
         results = results.map(i => ({...i, media_type: tmdbType}));
     }
 
@@ -161,45 +157,42 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
     else if (catalogId.startsWith("genre_")) {
         const genreKey = catalogId.replace("genre_", "");
         const genreId = GENRES[genreKey];
-        // Tu Stremio wymusza typ katalogu (movie), więc pobieramy filmy
         const data = await fetchTMDB(`/discover/movie`, `with_genres=${genreId}&sort_by=popularity.desc&page=${page}${regionParams}`);
         results = data?.results || [];
         results = results.map(i => ({...i, media_type: 'movie'}));
     }
 
-    // --- MAPOWANIE WYNIKÓW I FORMATOWANIE TYTUŁÓW ---
+    // --- MAPOWANIE WYNIKÓW ---
     return results.map(item => {
         const isMovie = item.media_type === 'movie';
         const date = item.release_date || item.first_air_date;
         const year = (date || "").substring(0, 4);
-        const typeTag = isMovie ? 'F' : 'S'; // F = Film, S = Serial
+        const typeTag = isMovie ? 'F' : 'S'; 
         
         let name = item.title || item.name;
 
-        // FORMATOWANIE 1: W TYM MIESIĄCU -> [PROVIDER-TYP]
+        // FORMATOWANIE 1: W TYM MIESIĄCU -> Tytuł [PROVIDER-TYP]
         if (catalogId === "this_month") {
-            // Próba zgadnięcia dostawcy (proste sprawdzenie, czy jest w kinach)
-            // Uwaga: TMDB w liście discover nie zawsze zwraca "flatrate" providers.
-            // Dla uproszczenia: Jeśli data jest przyszła -> KINO, jeśli przeszła -> VOD/TV
             const isFuture = new Date(date) > new Date();
-            const providerTag = isFuture ? "KINO" : "VOD"; // Można to ulepszyć ale wymagałoby dodatkowych zapytań
+            // Prosta logika: Przyszłość = KINO, Przeszłość = VOD/TV
+            // (Można tu w przyszłości dodać sprawdzanie providerów, ale to kosztuje dodatkowe zapytania API)
+            const providerTag = isFuture ? "KINO" : "VOD"; 
             
+            // ZMIANA: Usunięto [TERAZ]/[WKRÓTCE] z początku. Tylko suffix na końcu.
             name = `${name} [${providerTag}-${typeTag}]`;
         } 
-        // FORMATOWANIE 2: NOWOŚCI DOSTAWCÓW -> (TYP)
+        // FORMATOWANIE 2: NOWOŚCI DOSTAWCÓW -> Tytuł (TYP)
         else if (catalogId.endsWith("_new")) {
-            // Tutaj wiemy jaki to dostawca, bo jesteśmy w katalogu np. Netflix
-            // Więc dodajemy tylko (F) lub (S)
             name = `${name} (${typeTag})`;
         }
 
         return {
             id: `tmdb:${item.id}`,
-            // KLUCZOWE: Mimo że katalog to 'movie', tutaj mówimy prawdę co to jest!
             type: isMovie ? 'movie' : 'series',
             name: name,
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            description: item.overview,
+            // Fallback opisu: Jeśli brak PL, wstawiamy pusty string (Stremio lepiej to znosi niż undefined)
+            description: item.overview || "", 
             releaseInfo: formatReleaseDate(date)
         };
     }).filter(i => i.poster);
