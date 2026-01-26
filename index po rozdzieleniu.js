@@ -40,29 +40,10 @@ let HIDDEN_GROUPS = new Set();
 let isUpdating = false;
 
 /* =========================
-   TMDB CONFIG & HELPERS
+   TMDB ENGINE (INFINITE SCROLL)
 ========================= */
 const TMDB_BASE = "https://api.themoviedb.org/3";
-// Mapowanie ID dostawców
-const PROVIDERS = { 
-    "netflix": "8", 
-    "disney": "337", 
-    "amazon": "119", 
-    "apple": "350", 
-    "hbo": "384" 
-};
-// Mapowanie nazw dostawców do wyświetlania w tytule
-const PROVIDER_NAMES = {
-    "8": "NETFLIX",
-    "337": "DISNEY+",
-    "119": "PRIME",
-    "350": "APPLE",
-    "384": "MAX"
-};
-// Globalne Gatunki
-const GENRES = {
-    "action": "28", "comedy": "35", "horror": "27", "scifi": "878", "drama": "18", "animation": "16", "crime": "80"
-};
+const PROVIDERS = { "netflix": "8", "hbo": "384", "disney": "337", "amazon": "119", "apple": "350" };
 
 async function fetchTMDB(endpoint, params = "") {
     if (!TMDB_KEY) return null;
@@ -73,183 +54,57 @@ async function fetchTMDB(endpoint, params = "") {
     } catch (e) { return null; }
 }
 
-// Helper: Formatowanie daty "Za X dni"
-function formatReleaseDate(dateStr) {
-    if (!dateStr) return "";
-    const release = new Date(dateStr);
-    const now = new Date();
-    const diffTime = release - now;
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    if (diffDays < -30) return dateStr.substring(0, 4); // Stare: Rok
-    if (diffDays < 0) return "TERAZ";
-    if (diffDays === 0) return "DZIŚ";
-    if (diffDays === 1) return "JUTRO";
-    if (diffDays <= 30) return `ZA ${diffDays} DNI`;
-    
-    // Format DD.MM
-    const day = String(release.getDate()).padStart(2, '0');
-    const month = String(release.getMonth() + 1).padStart(2, '0');
-    return `${day}.${month}`;
-}
-
-/* =========================
-   CATALOG LOGIC (v15 ENGINE)
-========================= */
-async function getCatalog(catalogId, type, genre, skip = 0) {
-    let results = [];
+// NOWOŚĆ: Obsługa skip (paginacja)
+async function getCatalog(type, catalogId, skip = 0) {
     const tmdbType = type === 'series' ? 'tv' : 'movie';
-    const regionParams = "&watch_region=PL&region=PL";
-
-    // 1. SEKCJA "W TYM MIESIĄCU" (SUPER-KATALOG)
-    if (catalogId === "this_month") {
-        // Pobieramy premiery kinowe (Now Playing + Upcoming)
-        const [nowPlaying, upcoming, tvOnAir] = await Promise.all([
-            fetchTMDB("/movie/now_playing", `page=1${regionParams}`),
-            fetchTMDB("/movie/upcoming", `page=1${regionParams}`),
-            fetchTMDB("/tv/on_the_air", `page=1${regionParams}`) // Seriale lecące teraz
-        ]);
-
-        let combined = [];
-        if (nowPlaying?.results) combined.push(...nowPlaying.results.map(i => ({...i, media_type: 'movie', statusTag: 'TERAZ', providerTag: 'KINO'})));
-        if (upcoming?.results) combined.push(...upcoming.results.map(i => ({...i, media_type: 'movie', statusTag: 'WKRÓTCE', providerTag: 'KINO'})));
-        if (tvOnAir?.results) combined.push(...tvOnAir.results.map(i => ({...i, media_type: 'tv', statusTag: 'TERAZ', providerTag: 'TV'})));
-
-        // Filtrujemy tylko bieżący/przyszły miesiąc i sortujemy po dacie
-        results = combined.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
-    } 
+    let endpoint = "", params = "region=PL&include_adult=false";
     
-    // 2. SEKCJA GLOBALNE GATUNKI
-    else if (catalogId.startsWith("genre_")) {
-        const genreKey = catalogId.replace("genre_", "");
-        const genreId = GENRES[genreKey];
-        const sort = "sort_by=popularity.desc";
-        // Jeśli typ to "movie", szukamy filmów, jeśli "series" to seriali
-        const data = await fetchTMDB(`/discover/${tmdbType}`, `with_genres=${genreId}&${sort}${regionParams}&page=${Math.floor(skip/20)+1}`);
-        results = data?.results || [];
+    if (catalogId === "trending") endpoint = `/trending/${tmdbType}/week`;
+    else if (catalogId === "top_rated") endpoint = `/${tmdbType}/top_rated`;
+    else if (PROVIDERS[catalogId]) {
+        endpoint = `/discover/${tmdbType}`;
+        params += `&with_watch_providers=${PROVIDERS[catalogId]}&watch_region=PL&sort_by=popularity.desc`;
+    } else return [];
+    
+    // OBLICZANIE STRON (Stremio wysyła skip=0, 20, 40... TMDB ma strony po 20 wyników)
+    // Pobieramy 2 strony na raz (40 wyników), żeby ładowanie było płynne
+    const itemsPerPage = 20; 
+    const startPage = Math.floor(skip / itemsPerPage) + 1;
+    const endPage = startPage + 1; // Pobierz obecną i następną stronę
+
+    let allResults = [];
+    for (let i = startPage; i <= endPage; i++) {
+        const data = await fetchTMDB(endpoint, `${params}&page=${i}`);
+        if (data && data.results) allResults = allResults.concat(data.results);
+        else break;
     }
 
-    // 3. SEKCJA PREMIUM (3x3)
-    else {
-        // Parsujemy ID np. "netflix_movies", "disney_new"
-        const [providerName, subType] = catalogId.split("_");
-        const providerId = PROVIDERS[providerName];
-        
-        if (providerId) {
-            let sort = "sort_by=popularity.desc";
-            let discoverType = tmdbType;
-            let extraParams = "";
-
-            if (subType === "new") {
-                sort = "sort_by=primary_release_date.desc"; // Najnowsze
-                // Dla "mix" musimy zrobić dwa zapytania, ale Stremio wymaga jednego typu w odpowiedzi katalogu.
-                // Więc jeśli katalog jest zdefiniowany jako 'movie', pobieramy filmy, jak 'series' to seriale.
-                // W manifeście zrobimy osobne wpisy dla movies i series w sekcji "NOWOŚCI".
-            }
-
-            if (genre) {
-                // Filtrowanie po gatunku wewnątrz dostawcy!
-                // Musimy znaleźć ID gatunku na podstawie nazwy (np. "Horror")
-                const genreObj = Object.entries(GENRES).find(([k,v]) => k === genre.toLowerCase() || k === genre); // Uproszczenie
-                // Stremio wysyła nazwę "Horror", "Action" etc.
-                // Tutaj potrzebowalibyśmy mapowania Nazwa -> ID.
-                // Dla uproszczenia v15: Zakładamy, że user nie filtruje, lub dodamy prostą mapę później.
-            }
-
-            const data = await fetchTMDB(`/discover/${discoverType}`, `with_watch_providers=${providerId}${regionParams}&${sort}&page=${Math.floor(skip/20)+1}`);
-            results = data?.results || [];
-        }
-    }
-
-    // MAPOWANIE WYNIKÓW NA FORMAT STREMIO
-    return results.map(item => {
-        const isMovie = item.media_type === 'movie' || item.title;
-        const typeTag = isMovie ? 'F' : 'S';
-        const date = item.release_date || item.first_air_date;
-        const year = (date || "").substring(0, 4);
-        
-        // FORMATOWANIE TYTUŁU (DLA "W TYM MIESIĄCU")
-        let name = item.title || item.name;
-        let releaseInfo = year;
-
-        if (catalogId === "this_month") {
-            const provider = item.providerTag || "VOD";
-            const status = item.statusTag || (new Date(date) > new Date() ? "WKRÓTCE" : "TERAZ");
-            // [STATUS] Tytuł [PROVIDER-TYP]
-            name = `[${status}] ${name} [${provider}-${typeTag}]`;
-            // Inteligentna data w releaseInfo
-            releaseInfo = formatReleaseDate(date);
-        }
-
-        return {
-            id: `tmdb:${item.id}`,
-            type: isMovie ? 'movie' : 'series',
-            name: name,
-            poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            description: item.overview,
-            releaseInfo: releaseInfo
-        };
-    }).filter(i => i.poster);
+    return allResults.map(item => ({
+        id: `tmdb:${item.id}`,
+        type: type,
+        name: item.title || item.name,
+        poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+        description: item.overview,
+        releaseInfo: (item.release_date || item.first_air_date || "").substring(0, 4)
+    })).filter(i => i.poster);
 }
 
-/* =========================
-   META HANDLER (NAPRAWA SERIALI)
-========================= */
 async function getMetaFromTMDB(tmdbId, type) {
     const tmdbType = type === 'series' ? 'tv' : 'movie';
     const id = tmdbId.replace("tmdb:", "");
-    
-    // Kluczowe: Pobieramy external_ids ORAZ sezony
     const data = await fetchTMDB(`/${tmdbType}/${id}`, "append_to_response=external_ids");
     if (!data) return null;
-
-    const meta = {
+    return {
         id: data.external_ids?.imdb_id || `tmdb:${id}`,
-        tmdb_id: id,
-        type: type,
-        name: data.title || data.name,
+        tmdb_id: id, type: type, name: data.title || data.name,
         poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-        background: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
         description: data.overview || "Brak opisu.",
-        releaseInfo: (data.release_date || data.first_air_date || "").substring(0, 4),
-        genres: data.genres ? data.genres.map(g => g.name) : []
+        releaseInfo: (data.release_date || data.first_air_date || "").substring(0, 4)
     };
-
-    // 🚨 LOGIKA SERIALI - POBIERANIE ODCINKÓW 🚨
-    if (type === 'series' && data.seasons) {
-        meta.videos = [];
-        // Pobieramy szczegóły dla każdego sezonu (ograniczamy do pierwszych 5 żeby było szybciej, lub wszystkich)
-        // Uwaga: TMDB wymaga osobnego zapytania dla każdego sezonu.
-        const seasonPromises = data.seasons
-            .filter(s => s.season_number > 0) // Pomijamy specjały (sezon 0)
-            .map(s => fetchTMDB(`/tv/${id}/season/${s.season_number}`));
-        
-        const seasonsData = await Promise.all(seasonPromises);
-        
-        seasonsData.forEach(season => {
-            if (season && season.episodes) {
-                season.episodes.forEach(ep => {
-                    meta.videos.push({
-                        id: `tmdb:${id}:${season.season_number}:${ep.episode_number}`,
-                        title: ep.name,
-                        released: new Date(ep.air_date).toISOString(),
-                        season: season.season_number,
-                        episode: ep.episode_number,
-                        overview: ep.overview,
-                        thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
-                    });
-                });
-            }
-        });
-        // Sortujemy odcinki
-        meta.videos.sort((a,b) => (a.season - b.season) || (a.episode - b.episode));
-    }
-
-    return meta;
 }
 
 /* =========================
-   HELPERS (DASHBOARD & UTILS)
+   HELPERS
 ========================= */
 function deLeet(s) { return String(s || "").replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e").replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t").replace(/@/g, "a"); }
 function getNormalizedKey(filename) {
@@ -262,6 +117,17 @@ function getDisplayTitle(filename) {
   const clean = String(filename || "").replace(/[\._]/g, " ");
   const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
   return match && match[1] ? match[1].trim() : clean;
+}
+function getSearchQuery(filename) {
+  let clean = String(filename || "").replace(/[\._]/g, " ");
+  clean = clean.replace(/^\[.*?\]/, "").trim();
+  let match = clean.match(/^(.+?)\s+(19\d{2}|20\d{2})/);
+  if (match && match[1]) return match[1].trim();
+  match = clean.match(/^(.+?)(?=\s+s\d{2})/i);
+  if (match && match[1]) return match[1].trim();
+  match = clean.match(/^(.+?)(?=\s+(1080|720|4k|2160p|bluray|web|dvd|x264|uhd))/i);
+  if (match && match[1]) return match[1].trim();
+  return clean;
 }
 function hostersOnly(downloads) { return downloads.filter(d => d.streamable === 1 && !d.link.includes("/d/")); }
 function dashboardHostersOnly(downloads) { return downloads.filter(d => !d.link.includes("/d/")); }
@@ -281,25 +147,9 @@ function getStreamInfo(filename, sizeBytes) {
     if (f.includes("dv")) tags.push("DV");
     return tags.join(" | ");
 }
-function getSearchQuery(filename) {
-  let clean = String(filename || "").replace(/[\._]/g, " ");
-  // Usuń nawiasy na początku, jeśli są
-  clean = clean.replace(/^\[.*?\]/, "").trim();
-  // 1. Utnij wszystko od roku (np. 2024)
-  let match = clean.match(/^(.+?)\s+(19\d{2}|20\d{2})/);
-  if (match && match[1]) return match[1].trim();
-  // 2. Utnij wszystko od sezonu (S01)
-  match = clean.match(/^(.+?)(?=\s+s\d{2})/i);
-  if (match && match[1]) return match[1].trim();
-  // 3. Utnij wszystko od jakości (1080p, 4k, web-dl itp.)
-  match = clean.match(/^(.+?)(?=\s+(1080|720|4k|2160p|bluray|web|dvd|x264|hevc|uhd))/i);
-  if (match && match[1]) return match[1].trim();
-  
-  return clean;
-}
 
 /* =========================
-   METADATA CACHE FILLERS
+   METADATA LOGIC
 ========================= */
 async function fetchCinemeta(idOrName) {
   if (!idOrName.startsWith("tt")) return null;
@@ -312,41 +162,85 @@ async function fetchCinemeta(idOrName) {
   } catch (err) { return null; }
   return null;
 }
+async function fetchByImdbTMDB(imdbId) {
+    if (!TMDB_KEY) return null;
+    const data = await fetchTMDB(`/find/${imdbId}`, "external_source=imdb_id");
+    const res = data?.movie_results?.[0] || data?.tv_results?.[0];
+    if (res) return { id: imdbId, name: res.title || res.name, poster: res.poster_path ? `https://image.tmdb.org/t/p/w500${res.poster_path}` : null, type: res.media_type || (res.title ? "movie" : "series") };
+    return null;
+}
 
 /* =========================
-   MANAGER UI (HYBRID)
+   MANAGER UI (HYBRYDA: HTML Z PLIKU + DANE Z CACHE)
 ========================= */
 app.get("/manager", async (req, res) => {
+  // Sprawdzenie hasła (jeśli używasz)
+  // if (!checkAuth(req)) return res.set('WWW-Authenticate', 'Basic realm="401"').status(401).send('Logowanie wymagane');
+
   try {
+      // 1. POBIERANIE DANYCH Z TWOJEGO CACHE (To przywraca plakaty i wszystkie pliki)
       const showHidden = req.query.showHidden === "true";
-      const downloadFiles = typeof dashboardHostersOnly === 'function' ? dashboardHostersOnly(ALL_DOWNLOADS_CACHE) : ALL_DOWNLOADS_CACHE;
+      
+      // Używamy Twoich funkcji filtrujących (zakładam, że masz je w kodzie)
+      const downloadFiles = typeof dashboardHostersOnly === 'function' 
+          ? dashboardHostersOnly(ALL_DOWNLOADS_CACHE) 
+          : ALL_DOWNLOADS_CACHE; // Zabezpieczenie
       
       const groupsDownloads = {};
       const groupsTorrents = {};
       let stats = { totalFiles: downloadFiles.length + ALL_TORRENTS_CACHE.length, size: 0 };
 
+      // 2. LOGIKA GRUPOWANIA (Twoja oryginalna, która obsługuje plakaty!)
       const addToGroup = (item, targetGroup, isTorrent) => {
+          // Funkcje pomocnicze, które masz w kodzie
           const key = getNormalizedKey(item.filename); 
           const displayTitle = getDisplayTitle(item.filename);
+          
           if (!targetGroup[key]) {
-              targetGroup[key] = { key, displayName: displayTitle, files: [], assignedId: null, poster: null, detectedName: null, type: detectType(item.filename), size: 0, isTorrent, status: item.status, progress: item.progress, streamable: item.streamable };
+              targetGroup[key] = { 
+                  key, 
+                  displayName: displayTitle, 
+                  files: [], 
+                  assignedId: null, 
+                  poster: null, 
+                  detectedName: null, 
+                  type: detectType(item.filename), 
+                  size: 0, 
+                  isTorrent, 
+                  status: item.status, 
+                  progress: item.progress, 
+                  streamable: item.streamable 
+              };
           }
+          
           targetGroup[key].files.push(item);
           const size = isTorrent ? item.bytes : item.filesize;
           targetGroup[key].size += size; 
           stats.size += size;
-          if (METADATA_CACHE[item.id]) { const m = METADATA_CACHE[item.id]; targetGroup[key].assignedId = m.id; targetGroup[key].poster = m.poster; targetGroup[key].detectedName = m.name; targetGroup[key].type = m.type; }
+
+          // PRZYWRACANIE METADANYCH (PLAKATY)
+          if (METADATA_CACHE[item.id]) { 
+              const m = METADATA_CACHE[item.id]; 
+              targetGroup[key].assignedId = m.id; 
+              targetGroup[key].poster = m.poster; 
+              targetGroup[key].detectedName = m.name; 
+              targetGroup[key].type = m.type; 
+          }
       };
 
+      // Wypełniamy grupy danymi z Cache
       downloadFiles.forEach(f => addToGroup(f, groupsDownloads, false));
       ALL_TORRENTS_CACHE.forEach(t => addToGroup(t, groupsTorrents, true));
 
+      // 3. GENEROWANIE KAFELKÓW (RenderGrid)
       const gridDLSeries = renderGrid('series', groupsDownloads, showHidden, 'downloads', true);
       const gridDLMovie = renderGrid('movie', groupsDownloads, showHidden, 'downloads', false);
       const gridTorSeries = renderGrid('series', groupsTorrents, showHidden, 'torrents', true);
       const gridTorMovie = renderGrid('movie', groupsTorrents, showHidden, 'torrents', false);
 
+      // 4. WCZYTANIE PLIKU HTML I PODMIANA
       let template = fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
+
       let page = template
           .replace('{{STATS_SIZE}}', formatBytes(stats.size))
           .replace('{{STATS_FILES}}', stats.totalFiles)
@@ -359,7 +253,11 @@ app.get("/manager", async (req, res) => {
           .replace('{{GRID_TORRENTS_MOVIE}}', gridTorMovie);
 
       res.send(page);
-  } catch (e) { console.error("Błąd Dashboardu:", e); res.status(500).send("Błąd serwera: " + e.message); }
+
+  } catch (e) {
+      console.error("Błąd Dashboardu:", e);
+      res.status(500).send("Błąd serwera: " + e.message);
+  }
 });
 
 function renderGrid(type, groups, showHidden, viewMode, isActive) {
@@ -369,8 +267,10 @@ function renderGrid(type, groups, showHidden, viewMode, isActive) {
         if (HIDDEN_GROUPS.has(g.key) && !showHidden) continue;
         const posterSrc = g.poster ? `<img src="${g.poster}" class="poster-img">` : `<div class="no-poster"><span class="icon" style="font-size:40px">image_not_supported</span></div>`;
         const currentId = (g.assignedId && g.assignedId.startsWith("tt")) ? g.assignedId : "";
-        // Używamy getSearchQuery zamiast surowego g.displayName
+        
+        // FIX: Używamy funkcji getSearchQuery
         const searchUrl = `https://www.imdb.com/find?q=${encodeURIComponent(getSearchQuery(g.displayName))}`;
+        
         const cardClass = HIDDEN_GROUPS.has(g.key) ? "card hidden-item" : "card";
         const filesEncoded = encodeURIComponent(JSON.stringify(g.files.map(f => f.filename)));
         const safeTitle = g.detectedName || g.displayName;
@@ -467,90 +367,62 @@ async function syncAllDownloads() {
   } catch (e) { console.error("Sync error:", e.message); } finally { isUpdating = false; }
 }
 
-/* =========================
-   STREMIO MANIFEST & ROUTES (v15)
-========================= */
+// === STREMIO MANIFEST & ROUTES ===
 app.get("/manifest.json", (req, res) => {
-    // Definicja gatunków do filtrów
-    const genreFilters = Object.keys(GENRES).map(g => g.charAt(0).toUpperCase() + g.slice(1));
-    
-    res.json({
-        id: "community.rd.manager.v15",
-        version: "15.0.0",
-        name: "RDD ULTIMATE v15",
-        description: "Manager + Premium VOD + Kino",
-        logo: "https://rd-downloads-addon.onrender.com/assets/logo.png",
-        resources: ["stream", "catalog", "meta"],
-        types: ["movie", "series"],
-        idPrefixes: ["tt", "tmdb"],
-        catalogs: [
-            // MOJE PLIKI
-            { type: "series", id: "rd_series", name: "💎 MOJE SERIALE", extraSupported: ["skip"] }, 
-            { type: "movie", id: "rd_movies", name: "💎 MOJE FILMY", extraSupported: ["skip"] },
-            
-            // W TYM MIESIĄCU (SUPER KATALOG)
-            { type: "movie", id: "this_month", name: "W TYM MIESIĄCU", extraSupported: ["skip"] },
-            { type: "series", id: "this_month", name: "W TYM MIESIĄCU", extraSupported: ["skip"] },
-
-            // PREMIUM 3x3 (NETFLIX)
-            { type: "movie", id: "netflix_movies", name: "NETFLIX - FILMY", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "netflix_series", name: "NETFLIX - SERIALE", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "netflix_new", name: "NETFLIX - NOWOŚCI", extraSupported: ["skip"] },
-
-            // PREMIUM 3x3 (DISNEY+)
-            { type: "movie", id: "disney_movies", name: "DISNEY+ - FILMY", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "disney_series", name: "DISNEY+ - SERIALE", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "disney_new", name: "DISNEY+ - NOWOŚCI", extraSupported: ["skip"] },
-
-            // PREMIUM 3x3 (AMAZON)
-            { type: "movie", id: "amazon_movies", name: "AMZN PRIME - FILMY", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "amazon_series", name: "AMZN PRIME - SERIALE", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "amazon_new", name: "AMZN PRIME - NOWOŚCI", extraSupported: ["skip"] },
-
-            // GLOBALNE GATUNKI
-            { type: "movie", id: "genre_horror", name: "HORRORY", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_comedy", name: "KOMEDIE", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_scifi", name: "SCI-FI", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_action", name: "AKCJA", extraSupported: ["skip"] }
-        ]
-    });
+  res.json({
+    id: "community.rd.manager.final",
+    version: "14.1.0",
+    name: "RDD ULTIMATE",
+    description: "VOD Manager + PL",
+    logo: "https://rd-downloads-addon.onrender.com/assets/logo.png",
+    resources: ["stream", "catalog", "meta"],
+    types: ["movie", "series"],
+    idPrefixes: ["tt", "tmdb"],
+    catalogs: [
+        { type: "series", id: "rd_series", name: "💎 Moje Seriale", extraSupported: ["skip"] }, 
+        { type: "movie", id: "rd_movies", name: "💎 Moje Filmy", extraSupported: ["skip"] },
+        { type: "movie", id: "trending", name: "🔥 Popularne", extraSupported: ["skip"] },
+        { type: "series", id: "trending", name: "🔥 Popularne", extraSupported: ["skip"] },
+        { type: "movie", id: "netflix", name: "🔴 Netflix", extraSupported: ["skip"] },
+        { type: "series", id: "netflix", name: "🔴 Netflix", extraSupported: ["skip"] },
+        { type: "movie", id: "hbo", name: "🟣 HBO Max", extraSupported: ["skip"] },
+        { type: "series", id: "hbo", name: "🟣 HBO Max", extraSupported: ["skip"] },
+        { type: "movie", id: "disney", name: "🟢 Disney+", extraSupported: ["skip"] },
+        { type: "series", id: "disney", name: "🟢 Disney+", extraSupported: ["skip"] },
+        { type: "movie", id: "amazon", name: "🔵 Prime Video", extraSupported: ["skip"] },
+        { type: "series", id: "amazon", name: "🔵 Prime Video", extraSupported: ["skip"] },
+        { type: "movie", id: "apple", name: "🍏 Apple TV+", extraSupported: ["skip"] }
+    ]
+  });
 });
 
 async function handleCatalog(req, res) {
     const { type, id, extra } = req.params;
     let skip = 0;
-    let genre = null;
-    
-    // Parsowanie extra params (skip i genre)
-    if (extra) {
-        const skipMatch = extra.match(/skip=(\d+)/);
-        if (skipMatch) skip = parseInt(skipMatch[1]);
-        const genreMatch = extra.match(/genre=([^&]+)/);
-        if (genreMatch) genre = genreMatch[1];
-    }
+    if (extra) { const match = extra.match(/skip=(\d+)/); if (match) skip = parseInt(match[1]); }
 
-    // OBSŁUGA "MOJE PLIKI" (Lokalny Cache)
     if (id === "rd_series" || id === "rd_movies") {
         const metas = [];
         const files = hostersOnly(ALL_DOWNLOADS_CACHE); 
         const unique = new Set();
-        
-        const processItem = (item) => {
-            const key = getNormalizedKey(item.filename);
-            if (HIDDEN_GROUPS.has(key)) return;
-            const meta = METADATA_CACHE[item.id];
-            if (!meta || !meta.id.startsWith("tt") || meta.type !== type) return;
+        for (const f of files) {
+            const key = getNormalizedKey(f.filename);
+            if (HIDDEN_GROUPS.has(key)) continue;
+            const meta = METADATA_CACHE[f.id];
+            if (!meta || !meta.id.startsWith("tt") || meta.type !== type) continue;
             if (!unique.has(meta.id)) { unique.add(meta.id); metas.push({ id: meta.id, type: meta.type, name: meta.name, poster: meta.poster }); }
-        };
-
-        files.forEach(processItem);
-        ALL_TORRENTS_CACHE.filter(t => t.status === 'downloaded').forEach(processItem);
-        
+        }
+        for (const t of ALL_TORRENTS_CACHE) {
+            if (t.status !== 'downloaded') continue;
+            const key = getNormalizedKey(t.filename);
+            if (HIDDEN_GROUPS.has(key)) continue;
+            const meta = METADATA_CACHE[t.id];
+            if (!meta || !meta.id.startsWith("tt") || meta.type !== type) continue;
+            if (!unique.has(meta.id)) { unique.add(meta.id); metas.push({ id: meta.id, type: meta.type, name: meta.name, poster: meta.poster }); }
+        }
         return res.json({ metas: metas.slice(0, 100) });
     }
-
-    // OBSŁUGA KATALOGÓW TMDB (v15 Engine)
-    const items = await getCatalog(id, type, genre, skip);
+    const items = await getCatalog(type, id, skip);
     res.json({ metas: items });
 }
 
@@ -560,8 +432,6 @@ app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 app.get("/meta/:type/:id.json", async (req, res) => {
     const { type, id } = req.params;
     if (id.startsWith("tmdb:")) return res.json({ meta: await getMetaFromTMDB(id, type) });
-    
-    // Obsługa IMDb ID (konwersja na TMDB dla pełnych danych o odcinkach)
     if (id.startsWith("tt")) {
         const data = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
         const hit = data?.movie_results?.[0] || data?.tv_results?.[0];
@@ -573,30 +443,16 @@ app.get("/meta/:type/:id.json", async (req, res) => {
     res.status(404).send();
 });
 
-function parseSeasonEpisode(id) { 
-    // Obsługa formatu TMDB: tmdb:123:1:5 (ID:Sezon:Odcinek)
-    if (id.startsWith("tmdb:") && id.split(":").length >= 4) {
-        const p = id.split(":");
-        return { baseId: `tmdb:${p[1]}`, season: p[2], episode: p[3] }; 
-    }
-    const p = id.split(":"); 
-    return { baseId: p[0], season: p[1], episode: p[2] }; 
-}
+function parseSeasonEpisode(id) { const p = id.split(":"); return { baseId: p[0], season: p[1], episode: p[2] }; }
 
-app.get("/stream/:type/:id.json", async (req, res) => {
+app.get("/stream/:type/:id.json", (req, res) => {
   const { type, id } = req.params;
   const { baseId, season, episode } = parseSeasonEpisode(id);
   const streams = [];
   
-  // 1. SZUKANIE W CACHE (MOJE PLIKI)
-  // Musimy znaleźć odpowiednie ID z cache (IMDb lub TMDB)
-  // Uproszczenie: Szukamy po prostu pasującego assignedId w grupach
-  
-  // Dla downloadów
   for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
-    // Sprawdzamy czy meta.id pasuje do baseId (może być tt... lub tmdb:...)
-    if (meta && (meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) {
+    if (meta && meta.id === baseId) {
       const smartInfo = getStreamInfo(f.filename, f.filesize);
       const title = `${f.filename}\n${smartInfo}`;
       const name = "💎 MOJE RD";
@@ -606,14 +462,15 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
   }
 
-  // Dla torrentów
   for (const t of ALL_TORRENTS_CACHE) {
       if (t.status !== 'downloaded') continue;
       const meta = METADATA_CACHE[t.id];
-      if (meta && (meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) {
+      if (meta && meta.id === baseId) {
           if (t.files && t.links) {
               t.files.forEach((file, index) => {
-                  const match = (type === "series") ? matchesEpisode(file.path, season, episode) : true;
+                  const isVid = /\.(mkv|mp4|avi)$/i.test(file.path);
+                  let match = false;
+                  if (type === "series") match = matchesEpisode(file.path, season, episode); else match = true;
                   if (match) {
                       const myUrl = `${req.protocol}://${req.get('host')}/play/t/${t.id}/${index}`;
                       const title = `[TORRENT] ${path.basename(file.path)}\n${getStreamInfo(file.path, file.bytes)}`;
@@ -623,39 +480,6 @@ app.get("/stream/:type/:id.json", async (req, res) => {
           }
       }
   }
-
-  // 2. SEKCJA "PODOBNE" (REKOMENDACJE TMDB)
-  // Dodajemy to na końcu listy jako "strumienie", które przekierowują do detali
-  try {
-      const tmdbId = baseId.replace("tmdb:", "").replace("tt", ""); // Proste czyszczenie, idealnie powinniśmy mieć pewne TMDB ID
-      // Jeśli to ID imdb (tt...), musimy najpierw znaleźć TMDB ID.
-      let realTmdbId = tmdbId;
-      if (baseId.startsWith("tt")) {
-          const find = await fetchTMDB(`/find/${baseId}`, "external_source=imdb_id");
-          const hit = find?.movie_results?.[0] || find?.tv_results?.[0];
-          if (hit) realTmdbId = hit.id;
-      }
-
-      const endpoint = type === 'series' ? `/tv/${realTmdbId}/recommendations` : `/movie/${realTmdbId}/recommendations`;
-      const recData = await fetchTMDB(endpoint);
-      
-      if (recData && recData.results) {
-          recData.results.slice(0, 5).forEach(rec => {
-              const recTitle = rec.title || rec.name;
-              const recYear = (rec.release_date || rec.first_air_date || "").substring(0,4);
-              // Stremio Deep Link do detali
-              const deepLink = `stremio:///detail/${type === 'series' ? 'series' : 'movie'}/tmdb:${rec.id}`;
-              
-              streams.push({
-                  name: "🔍 PODOBNE",
-                  title: `${recTitle} (${recYear})\nOcena: ${rec.vote_average}/10`,
-                  url: deepLink,
-                  behaviorHints: { bingieGroup: "recommendations" } // Opcjonalne
-              });
-          });
-      }
-  } catch (e) { console.error("Rec error", e); }
-
   res.json({ streams });
 });
 
@@ -671,4 +495,4 @@ app.get("/play/t/:tid/:idx", async (req, res) => {
     } catch (e) { res.status(500).send("Server Error"); }
 });
 
-app.listen(PORT, "0.0.0.0", () => { console.log("✅ RDD ULTIMATE v15.0 (New Engine) RUNNING"); syncAllDownloads(); setInterval(syncAllDownloads, 15 * 60 * 1000); });
+app.listen(PORT, "0.0.0.0", () => { console.log("✅ RDD ULTIMATE v14.1 (Infinite Scroll + Search Top) RUNNING"); syncAllDownloads(); setInterval(syncAllDownloads, 15 * 60 * 1000); });
