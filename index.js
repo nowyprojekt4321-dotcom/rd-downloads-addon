@@ -490,7 +490,7 @@ app.get("/manifest.json", (req, res) => {
     res.json({
         id: "community.rd.manager.v15",
         version: "15.0.0",
-        name: "RDD ULTIMATE v15",
+        name: "RDD ULTIMATE PL",
         description: "Manager + Premium VOD + Kino",
         logo: "https://rd-downloads-addon.onrender.com/assets/logo.png",
         resources: ["stream", "catalog", "meta"],
@@ -503,28 +503,29 @@ app.get("/manifest.json", (req, res) => {
             
             // W TYM MIESIĄCU (JEDEN SUPER-KATALOG MIX)
             // Definiujemy jako 'movie', ale wsadzimy tu też seriale
-            { type: "movie", id: "this_month", name: "📅 W TYM MIESIĄCU", extraSupported: ["skip"] },
+            { type: "movie", id: "this_month", name: "◢◤W TYM MIESIĄCU", extraSupported: ["skip"] },
 
             // PREMIUM 3x3 (NETFLIX)
-            { type: "movie", id: "netflix_movies", name: "NETFLIX - FILMY", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "netflix_series", name: "NETFLIX - SERIALE", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "netflix_new", name: "NETFLIX - NOWOŚCI", extraSupported: ["skip"] }, // MIX
+            { type: "movie", id: "netflix_movies", name: "◢◤NETFLIX", extraSupported: ["skip", "genre"] },
+            { type: "series", id: "netflix_series", name: "◢◤NETFLIX", extraSupported: ["skip", "genre"] },
+            { type: "movie", id: "netflix_new", name: "◢◤NETFLIX | NOWOŚCI", extraSupported: ["skip"] }, // MIX
 
             // PREMIUM 3x3 (DISNEY+)
-            { type: "movie", id: "disney_movies", name: "DISNEY+ - FILMY", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "disney_series", name: "DISNEY+ - SERIALE", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "disney_new", name: "DISNEY+ - NOWOŚCI", extraSupported: ["skip"] }, // MIX
+            { type: "movie", id: "disney_movies", name: "◢◤DISNEY+", extraSupported: ["skip", "genre"] },
+            { type: "series", id: "disney_series", name: "◢◤DISNEY+", extraSupported: ["skip", "genre"] },
+            { type: "movie", id: "disney_new", name: "◢◤DISNEY+ | NOWOŚCI", extraSupported: ["skip"] }, // MIX
 
             // PREMIUM 3x3 (AMAZON)
-            { type: "movie", id: "amazon_movies", name: "AMZN PRIME - FILMY", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "amazon_series", name: "AMZN PRIME - SERIALE", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "amazon_new", name: "AMZN PRIME - NOWOŚCI", extraSupported: ["skip"] }, // MIX
+            { type: "movie", id: "amazon_movies", name: "◢◤AMZN PRIME", extraSupported: ["skip", "genre"] },
+            { type: "series", id: "amazon_series", name: "◢◤AMZN PRIME", extraSupported: ["skip", "genre"] },
+            { type: "movie", id: "amazon_new", name: "◢◤AMZN PRIME | NOWOŚCI", extraSupported: ["skip"] }, // MIX
 
             // GLOBALNE GATUNKI
             { type: "movie", id: "genre_horror", name: "HORRORY", extraSupported: ["skip"] },
             { type: "movie", id: "genre_comedy", name: "KOMEDIE", extraSupported: ["skip"] },
             { type: "movie", id: "genre_scifi", name: "SCI-FI", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_action", name: "AKCJA", extraSupported: ["skip"] }
+            { type: "movie", id: "genre_action", name: "AKCJA", extraSupported: ["skip"] },
+            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extraSupported: ["skip"] }
         ]
     });
 });
