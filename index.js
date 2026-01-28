@@ -63,6 +63,48 @@ const PROVIDER_NAMES = {
 const GENRES = {
     "action": "28", "comedy": "35", "horror": "27", "scifi": "878", "drama": "18", "animation": "16", "crime": "80"
 };
+// 1. LISTY DO MENU (WIDOCZNE DLA UŻYTKOWNIKA)
+const FILTERS_STANDARD = [
+    "Akcja", "Komedia", "Horror", "Sci-Fi", "Dramat", "Kryminał", 
+    "Ten rok", "Zeszły rok", "Ostatnie 5 lat", 
+    "Hity (8.0+)", "Dobre (7.0+)"
+];
+
+const FILTERS_HORROR = [
+    "Zombie", "Slasher", "Duchy", "Opętania", "Wampiry", "Potwory", "Psychologiczny",
+    "Ten rok", "Hity (8.0+)"
+];
+
+const FILTERS_ACTION = [
+    "Superbohaterowie", "Sztuki Walki", "Wyścigi", "Szpiedzy", "Wojenne", "Cyberpunk",
+    "Ten rok", "Hity (8.0+)"
+];
+
+const FILTERS_COMEDY = [
+    "Czarna Komedia", "Parodia", "Romantyczna", "Szkolna", "Świąteczne",
+    "Ten rok", "Hity (8.0+)"
+];
+
+const FILTERS_SCIFI = [
+    "Kosmos", "Obcy", "Podróże w czasie", "Post-Apo", "Sztuczna Inteligencja", "Cyberpunk",
+    "Ten rok", "Hity (8.0+)"
+];
+
+// 2. MAPA SŁÓW KLUCZOWYCH (TŁUMACZ NA ID TMDB)
+const KEYWORDS = {
+    // HORROR
+    "Zombie": "12377", "Slasher": "12339", "Duchy": "9675", "Opętania": "1701", 
+    "Wampiry": "3133", "Potwory": "4953", "Psychologiczny": "12565",
+    // AKCJA
+    "Superbohaterowie": "9748", "Sztuki Walki": "9680", "Wyścigi": "830", 
+    "Szpiedzy": "470", "Wojenne": "10705",
+    // KOMEDIA
+    "Czarna Komedia": "9716", "Parodia": "9714", "Romantyczna": "9799", 
+    "Szkolna": "6270", "Świąteczne": "207317",
+    // SCI-FI
+    "Kosmos": "9882", "Obcy": "9951", "Podróże w czasie": "4387", 
+    "Post-Apo": "285366", "Sztuczna Inteligencja": "310", "Cyberpunk": "12190"
+};
 
 async function fetchTMDB(endpoint, params = "") {
     if (!TMDB_KEY) return null;
@@ -89,114 +131,182 @@ function formatReleaseDate(dateStr) {
 }
 
 /* =========================
-   CATALOG LOGIC (v15.5 SMART VOTE FILTER)
+   CATALOG LOGIC (v16.0 FINAL ENGINE: FILTERS + SORT FIX + CLEAN UI)
 ========================= */
 async function getCatalog(catalogId, type, genre, skip = 0) {
     let results = [];
     const regionParams = "&watch_region=PL&region=PL";
     const page = Math.floor(skip / 20) + 1;
+    const now = new Date();
+    const currentYear = now.getFullYear(); // np. 2026
 
-    // --- 1. SEKCJA "PREMIERY" (MIX FILMY + SERIALE) ---
-    if (catalogId === "this_month") {
-        const now = new Date();
-        // Limit górny: +3 miesiące (widzimy przyszłość)
-        const futureDate = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString().split('T')[0];
+    // --- BUDOWANIE PARAMETRÓW FILTROWANIA ---
+    let sortParam = "sort_by=primary_release_date.desc"; // Domyślne sortowanie
+    let extraFilters = "&vote_count.gte=50"; // Podstawowy filtr jakości
 
-        // KONFIGURACJA FILTRÓW:
-        // 1. vote_count.gte=50 -> TO JEST KLUCZ. Wywala amatorskie produkcje i błędy bazy danych.
-        //    Prawdziwe hity kinowe (nawet przed premierą) mają dużo głosów "Want to see".
-        // 2. Sortowanie po dacie -> Żebyś widział co wychodzi TERAZ.
-        const filters = `primary_release_date.lte=${futureDate}&sort_by=primary_release_date.desc&vote_count.gte=50`;
-        const tvFilters = `first_air_date.lte=${futureDate}&sort_by=first_air_date.desc&vote_count.gte=50`;
-
-        const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `${filters}&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `${tvFilters}&page=${page}${regionParams}`)
-        ]);
-
-        let mixed = [];
-        if (movies?.results) mixed.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
-        if (series?.results) mixed.push(...series.results.map(i => ({...i, media_type: 'tv'})));
-
-        // Sortujemy mix po dacie (Najnowsze na górze)
-        results = mixed.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
-    } 
-
-    // --- 2. SEKCJA PREMIUM NOWOŚCI ---
-    else if (catalogId.endsWith("_new")) {
-        const [providerName] = catalogId.split("_");
-        const providerId = PROVIDERS[providerName];
+    // OBSŁUGA FILTRÓW Z MENU (GENRE)
+    if (genre) {
+        // A. SŁOWA KLUCZOWE (ZOMBIE, SLASHER ITD.) - z mapy KEYWORDS
+        if (KEYWORDS[genre]) {
+            extraFilters += `&with_keywords=${KEYWORDS[genre]}`;
+        }
         
-        // Tu też filtrujemy (min 20 głosów dla streamingów, bo tam czasem wychodzą niszowe rzeczy szybciej)
-        const [movies, series] = await Promise.all([
-            fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&sort_by=primary_release_date.desc&vote_count.gte=20&page=${page}${regionParams}`),
-            fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&sort_by=first_air_date.desc&vote_count.gte=20&page=${page}${regionParams}`)
-        ]);
-
-        let mixed = [];
-        if (movies?.results) mixed.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
-        if (series?.results) mixed.push(...series.results.map(i => ({...i, media_type: 'tv'})));
-
-        results = mixed.sort((a,b) => new Date(b.release_date || b.first_air_date) - new Date(a.release_date || a.first_air_date));
-    }
-
-    // --- 3. SEKCJA PREMIUM ZWYKŁA ---
-    else if (PROVIDERS[catalogId.split("_")[0]]) {
-        const [providerName, subType] = catalogId.split("_");
-        const providerId = PROVIDERS[providerName];
-        const tmdbType = (subType === 'series' || type === 'series') ? 'tv' : 'movie';
-        
-        let genreParam = "";
-        if (genre) {
-            const genreObj = Object.entries(GENRES).find(([k,v]) => k === genre.toLowerCase() || k === genre);
-            if (genreObj) genreParam = `&with_genres=${genreObj[1]}`;
+        // B. STANDARDOWE GATUNKI (Akcja, Komedia...)
+        else if (["Akcja", "Komedia", "Horror", "Sci-Fi", "Dramat", "Animowany", "Kryminał", "Fantasy", "Przygodowy", "Dokumentalny"].includes(genre)) {
+             const genreMap = { 
+                "Akcja": "28", "Komedia": "35", "Horror": "27", "Sci-Fi": "878", "Dramat": "18", 
+                "Animowany": "16", "Kryminał": "80", "Fantasy": "14", "Przygodowy": "12", "Dokumentalny": "99"
+            };
+            if (genreMap[genre]) extraFilters += `&with_genres=${genreMap[genre]}`;
         }
 
-        const data = await fetchTMDB(`/discover/${tmdbType}`, `with_watch_providers=${providerId}&sort_by=popularity.desc${genreParam}&page=${page}${regionParams}`);
-        results = data?.results || [];
-        results = results.map(i => ({...i, media_type: tmdbType}));
+        // C. OCENY
+        else if (genre === "Hity (8.0+)") extraFilters += `&vote_average.gte=8.0&vote_count.gte=200`;
+        else if (genre === "Dobre (7.0+)") extraFilters += `&vote_average.gte=7.0&vote_count.gte=100`;
+        else if (genre === "Reszta (4.5+)") extraFilters += `&vote_average.gte=4.5`;
+
+        // D. LATA (MATEMATYKA DAT)
+        else if (genre === "Ten rok") {
+            // Tylko obecny rok
+            extraFilters += `&primary_release_year=${currentYear}`;
+            extraFilters += `&first_air_date_year=${currentYear}`;
+        }
+        else if (genre === "Zeszły rok") {
+            // Tylko poprzedni rok
+            extraFilters += `&primary_release_year=${currentYear - 1}`;
+            extraFilters += `&first_air_date_year=${currentYear - 1}`;
+        }
+        else if (genre === "Ostatnie 5 lat") {
+            // Zakres: (Rok-6) do (Rok-2) -> np. 2020-2024
+            const start = currentYear - 6;
+            const end = currentYear - 2;
+            extraFilters += `&primary_release_date.gte=${start}-01-01&primary_release_date.lte=${end}-12-31`;
+            extraFilters += `&first_air_date.gte=${start}-01-01&first_air_date.lte=${end}-12-31`;
+        }
+        else if (genre === "Ostatnie 10 lat") {
+            // Zakres: (Rok-11) do (Rok-7) -> np. 2015-2019
+            const start = currentYear - 11;
+            const end = currentYear - 7;
+            extraFilters += `&primary_release_date.gte=${start}-01-01&primary_release_date.lte=${end}-12-31`;
+            extraFilters += `&first_air_date.gte=${start}-01-01&first_air_date.lte=${end}-12-31`;
+        }
     }
 
-    // --- 4. GATUNKI GLOBALNE ---
+    // --- 1. SEKCJA PREMIERY (MIX) ---
+    if (catalogId === "this_month") {
+        // Jeśli brak filtra, domyślnie pokazujemy też przyszłość (+3 miesiące)
+        if (!genre) {
+            const futureDate = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString().split('T')[0];
+            extraFilters += `&primary_release_date.lte=${futureDate}`; // Tylko limit górny, dolnego brak = nieskończony scroll
+            // Dla seriali first_air_date jest obsługiwane w URL poniżej
+        }
+
+        const [movies, series] = await Promise.all([
+            fetchTMDB("/discover/movie", `${sortParam}${extraFilters}&page=${page}${regionParams}`),
+            fetchTMDB("/discover/tv", `${sortParam.replace('primary_release_date', 'first_air_date')}${extraFilters}&page=${page}${regionParams}`)
+        ]);
+
+        if (movies?.results) results.push(...movies.results.map(i => ({...i, media_type: 'movie'})));
+        if (series?.results) results.push(...series.results.map(i => ({...i, media_type: 'tv'})));
+    } 
+
+    // --- 2. SEKCJA PREMIUM (NETFLIX, DISNEY ITD.) ---
+    else if (catalogId.endsWith("_movies") || catalogId.endsWith("_series") || catalogId.endsWith("_new")) {
+        let providerId = "8"; // Default Netflix
+        if (catalogId.includes("disney")) providerId = "337";
+        if (catalogId.includes("amazon")) providerId = "119";
+        
+        // Wykrywamy co pobrać
+        const isMovies = catalogId.includes("_movies") || (catalogId.endsWith("_new") && type === 'movie');
+        const isSeries = catalogId.includes("_series") || (catalogId.endsWith("_new") && type === 'series');
+        const isMix = catalogId.endsWith("_new"); // Mix tylko dla _new
+
+        const requests = [];
+        // Dla filmów
+        if (isMovies || isMix) {
+            requests.push(fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&${sortParam}${extraFilters}&page=${page}${regionParams}`));
+        }
+        // Dla seriali (zamieniamy klucz sortowania na first_air_date)
+        if (isSeries || isMix) {
+            requests.push(fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&${sortParam.replace('primary_release_date', 'first_air_date')}${extraFilters}&page=${page}${regionParams}`));
+        }
+
+        const responses = await Promise.all(requests);
+        
+        responses.forEach(data => {
+            if (data?.results) {
+                // Wykrywanie typu, bo discover/movie nie zawsze zwraca media_type
+                results.push(...data.results.map(i => ({
+                    ...i, 
+                    media_type: i.title ? 'movie' : 'tv'
+                })));
+            }
+        });
+    }
+
+    // --- 3. GATUNKI GLOBALNE (ZACHOWUJEMY STARĄ LOGIKĘ DLA GENRE_*) ---
     else if (catalogId.startsWith("genre_")) {
         const genreKey = catalogId.replace("genre_", "");
         const genreId = GENRES[genreKey];
-        const data = await fetchTMDB(`/discover/movie`, `with_genres=${genreId}&sort_by=popularity.desc&page=${page}${regionParams}`);
+        // Tutaj też stosujemy sortowanie po dacie i min. głosy
+        const data = await fetchTMDB(`/discover/movie`, `with_genres=${genreId}&sort_by=primary_release_date.desc&vote_count.gte=50&page=${page}${regionParams}`);
         results = data?.results || [];
         results = results.map(i => ({...i, media_type: 'movie'}));
     }
+    
+    // --- 4. ZWYKŁE KATALOGI PROVIDERÓW (BACKUP) ---
+    else if (PROVIDERS[catalogId.split("_")[0]]) {
+        // ... (Logika legacy, rzadko używana przy obecnym setupie)
+         const [providerName, subType] = catalogId.split("_");
+         const providerId = PROVIDERS[providerName];
+         const tmdbType = (subType === 'series' || type === 'series') ? 'tv' : 'movie';
+         const data = await fetchTMDB(`/discover/${tmdbType}`, `with_watch_providers=${providerId}&sort_by=popularity.desc&page=${page}${regionParams}`);
+         results = data?.results || [];
+         results = results.map(i => ({...i, media_type: tmdbType}));
+    }
 
-    // --- MAPOWANIE WYNIKÓW ---
+    // --- 5. FIX SORTOWANIA (KLUCZOWE DLA DAT) ---
+    // TMDB zwraca posortowane paczki, ale po złączeniu (Film+Serial) kolejność się psuje.
+    // Tutaj wymuszamy sortowanie absolutne: Najnowsze na górze.
+    results = results.sort((a, b) => {
+        const dateA = new Date(a.release_date || a.first_air_date || "1900-01-01");
+        const dateB = new Date(b.release_date || b.first_air_date || "1900-01-01");
+        return dateB - dateA; // Malejąco (2026 -> 2025)
+    });
+
+    // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) ---
     return results.map(item => {
         const isMovie = item.media_type === 'movie';
         const date = item.release_date || item.first_air_date;
         const year = (date || "").substring(0, 4);
         
         let name = item.title || item.name;
+        let descriptionPrefix = ""; // To dodamy do opisu
 
-        // TAGI (CZYSTE I PROSTE)
-        if (catalogId === "this_month") {
+        // Logika wyglądu dla katalogów Premium/Premiery
+        if (catalogId === "this_month" || catalogId.endsWith("_new") || catalogId.endsWith("_movies") || catalogId.endsWith("_series")) {
             const releaseDate = new Date(date);
-            const now = new Date(); 
+            const nowTime = new Date(); 
             
-            let tag = "";
-            if (releaseDate > now) {
-                tag = "WKRÓTCE";
+            // Jeśli przyszłość -> ⏳ w tytule
+            if (releaseDate > nowTime) {
+                name = `⏳ ${name}`;
+                descriptionPrefix = "⚠️ PREMIERA WKRÓTCE | ";
             } else {
-                tag = isMovie ? "FILM" : "SERIAL";
+                // Jeśli przeszłość -> Czysty tytuł, info w opisie
+                descriptionPrefix = isMovie ? "🎬 FILM | " : "📺 SERIAL | ";
             }
-            name = `${name} [${tag}]`;
-        } 
-        else if (catalogId.endsWith("_new")) {
-            name = `${name} [${isMovie ? 'FILM' : 'SERIAL'}]`;
         }
+
+        const originalDesc = item.overview || "Brak opisu.";
+        const fullDescription = `${descriptionPrefix}${originalDesc}`;
 
         return {
             id: `tmdb:${item.id}`,
             type: isMovie ? 'movie' : 'series',
-            name: name,
+            name: name, // Czysty tytuł (ew. z emoji ⏳)
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            description: item.overview || "", 
+            description: fullDescription, // Info FILM/SERIAL jest tu
             releaseInfo: formatReleaseDate(date)
         };
     }).filter(i => i.poster);
@@ -499,35 +609,30 @@ app.get("/manifest.json", (req, res) => {
         types: ["movie", "series"],
         idPrefixes: ["tt", "tmdb"],
         catalogs: [
-            // MOJE PLIKI (Tu muszą być osobno, bo to cache lokalny)
+            // 1. MOJE PLIKI
             { type: "series", id: "rd_series", name: "💎 MOJE SERIALE", extraSupported: ["skip"] }, 
             { type: "movie", id: "rd_movies", name: "💎 MOJE FILMY", extraSupported: ["skip"] },
             
-            // W TYM MIESIĄCU (JEDEN SUPER-KATALOG MIX)
-            // Definiujemy jako 'movie', ale wsadzimy tu też seriale
-            { type: "movie", id: "this_month", name: "◢◤PREMIERY", extraSupported: ["skip"] },
+            // 2. PREMIERY & PREMIUM (STANDARDOWE FILTRY)
+            { type: "movie", id: "this_month", name: "◢◤PREMIERY", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "movie", id: "netflix_movies", name: "◢◤NETFLIX", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "series", id: "netflix_series", name: "◢◤NETFLIX", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "movie", id: "netflix_new", name: "◢◤NETFLIX | NOWOŚCI", extraSupported: ["skip"] },
 
-            // PREMIUM 3x3 (NETFLIX)
-            { type: "movie", id: "netflix_movies", name: "◢◤NETFLIX", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "netflix_series", name: "◢◤NETFLIX", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "netflix_new", name: "◢◤NETFLIX | NOWOŚCI", extraSupported: ["skip"] }, // MIX
+            { type: "movie", id: "disney_movies", name: "◢◤DISNEY+", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "series", id: "disney_series", name: "◢◤DISNEY+", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "movie", id: "disney_new", name: "◢◤DISNEY+ | NOWOŚCI", extraSupported: ["skip"] },
 
-            // PREMIUM 3x3 (DISNEY+)
-            { type: "movie", id: "disney_movies", name: "◢◤DISNEY+", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "disney_series", name: "◢◤DISNEY+", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "disney_new", name: "◢◤DISNEY+ | NOWOŚCI", extraSupported: ["skip"] }, // MIX
+            { type: "movie", id: "amazon_movies", name: "◢◤AMZN PRIME", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "series", id: "amazon_series", name: "◢◤AMZN PRIME", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
+            { type: "movie", id: "amazon_new", name: "◢◤AMZN PRIME | NOWOŚCI", extraSupported: ["skip"] },
 
-            // PREMIUM 3x3 (AMAZON)
-            { type: "movie", id: "amazon_movies", name: "◢◤AMZN PRIME", extraSupported: ["skip", "genre"] },
-            { type: "series", id: "amazon_series", name: "◢◤AMZN PRIME", extraSupported: ["skip", "genre"] },
-            { type: "movie", id: "amazon_new", name: "◢◤AMZN PRIME | NOWOŚCI", extraSupported: ["skip"] }, // MIX
-
-            // GLOBALNE GATUNKI
-            { type: "movie", id: "genre_horror", name: "HORRORY", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_comedy", name: "KOMEDIE", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_scifi", name: "SCI-FI", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_action", name: "AKCJA", extraSupported: ["skip"] },
-            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extraSupported: ["skip"] }
+            // 3. GATUNKI SPECJALNE (DEDYKOWANE FILTRY!)
+            { type: "movie", id: "genre_horror", name: "HORRORY", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_HORROR }] },
+            { type: "movie", id: "genre_comedy", name: "KOMEDIE", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_COMEDY }] },
+            { type: "movie", id: "genre_scifi", name: "SCI-FI", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_SCIFI }] },
+            { type: "movie", id: "genre_action", name: "AKCJA", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_ACTION }] },
+            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extraSupported: ["skip"] } // Tu zostawiamy bez filtrów lub standard
         ]
     });
 });
