@@ -312,9 +312,9 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
             const nowTime = new Date(); 
             if (releaseDate > nowTime) {
                 name = `${name}`;
-                descriptionPrefix = "PREMIERA WKRÓTCE | ";
+                descriptionPrefix = "";
             } else {
-                descriptionPrefix = isMovie ? "FILM | " : "SERIAL | ";
+                descriptionPrefix = isMovie ? "" : "";
             }
         }
 
