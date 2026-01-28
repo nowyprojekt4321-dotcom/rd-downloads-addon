@@ -163,61 +163,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
     const now = new Date();
     const currentYear = now.getFullYear(); // 2026
 
-    // --- 0. SEKCJA REKOMENDACJI TRAKT (MIX 3 OSTATNICH) ---
-    if (catalogId === "trakt_mix") {
-        try {
-            // 1. Pobieramy 3 ostatnio oglądane filmy z Trakt
-            const traktRes = await fetch(`https://api.trakt.tv/users/${TRAKT_USERNAME}/history/movies?limit=1`, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "trakt-api-version": "2",
-                    "trakt-api-key": TRAKT_CLIENT_ID
-                }
-            });
-            const history = await traktRes.json();
-
-            if (history && history.length > 0) {
-                // 2. Tworzymy zapytania do TMDB dla każdego z 3 filmów
-                const promises = history.map(item => {
-                    const tmdbId = item.movie.ids.tmdb;
-                    // Pobieramy rekomendacje
-                    return fetchTMDB(`/movie/${tmdbId}/recommendations`, `page=${page}${regionParams}`)
-                        .then(res => res?.results || [])
-                        .then(movies => movies.map(m => ({
-                            ...m, 
-                            media_type: 'movie',
-                            // DOKLEJAMY INFO O ŹRÓDLE REKOMENDACJI
-                            _source_title: item.movie.title 
-                        })));
-                });
-
-                // 3. Czekamy na wyniki i łączymy je
-                const arrays = await Promise.all(promises);
-                let mixed = arrays.flat();
-
-                // 4. Usuwamy duplikaty
-                const uniqueIds = new Set();
-                results = mixed.filter(item => {
-                    if (uniqueIds.has(item.id)) return false;
-                    uniqueIds.add(item.id);
-                    return true;
-                });
-
-                // 5. Sortujemy od najnowszych
-                results.sort((a, b) => {
-                    const dateA = new Date(a.release_date || "1900-01-01");
-                    const dateB = new Date(b.release_date || "1900-01-01");
-                    return dateB - dateA;
-                });
-            }
-        } catch (e) {
-            console.error("Błąd Trakt Mix:", e.message);
-            // Fallback: jak Trakt padnie, pokaż popularne
-            const fallback = await fetchTMDB("/discover/movie", "sort_by=popularity.desc");
-            if (fallback?.results) results = fallback.results.map(i => ({...i, media_type: 'movie'}));
-        }
-    }
-
     // --- BUDOWANIE PARAMETRÓW FILTROWANIA ---
     let sortParam = "sort_by=primary_release_date.desc"; // Domyślnie najnowsze
     let extraFilters = "&vote_count.gte=50"; // Anty-śmieci
@@ -371,11 +316,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
             } else {
                 descriptionPrefix = isMovie ? "🎬 FILM | " : "📺 SERIAL | ";
             }
-        }
-
-        // Oznaczenia Trakt Mix (Wklej to wewnątrz results.map)
-        if (item._source_title) {
-            descriptionPrefix = `💡 BO OGLĄDAŁEŚ: ${item._source_title.toUpperCase()} | ${descriptionPrefix}`;
         }
 
         return {
@@ -689,9 +629,6 @@ app.get("/manifest.json", (req, res) => {
             // 1. MOJE PLIKI
             { type: "series", id: "rd_series", name: "💎 MOJE SERIALE", extraSupported: ["skip"] }, 
             { type: "movie", id: "rd_movies", name: "💎 MOJE FILMY", extraSupported: ["skip"] },
-
-            //JEDEN KATALOG MIX <---
-            { type: "movie", id: "trakt_mix", name: "💎 BO OGLĄDAŁEŚ (MIX)", extraSupported: ["skip"] },
             
             // 2. PREMIERY & PREMIUM (STANDARDOWE FILTRY)
             { type: "movie", id: "this_month", name: "◢◤PREMIERY", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
