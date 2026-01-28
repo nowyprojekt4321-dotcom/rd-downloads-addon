@@ -63,34 +63,47 @@ const PROVIDER_NAMES = {
 const GENRES = {
     "action": "28", "comedy": "35", "horror": "27", "scifi": "878", "drama": "18", "animation": "16", "crime": "80"
 };
-// 1. LISTY DO MENU (WIDOCZNE DLA UŻYTKOWNIKA)
+// 1. WSPÓLNA KOŃCÓWKA DLA WSZYSTKICH (LATA + OCENY)
+const COMMON_FILTERS = [
+    "--- LATA ---", 
+    "Ten rok", "Zeszły rok", "5 lat wstecz", "10 lat wstecz",
+    "--- OCENY ---", 
+    "Hity (8.0+)", "Dobre (7.0+)", "Reszta (4.5+)"
+];
+
+// 2. LISTY DO MENU
 const FILTERS_STANDARD = [
-    "Akcja", "Komedia", "Horror", "Sci-Fi", "Dramat", "Kryminał", 
-    "Ten rok", "Zeszły rok", "Ostatnie 5 lat", 
-    "Hity (8.0+)", "Dobre (7.0+)"
+    "Akcja", "Komedia", "Horror", "Fanstasy", "Przygodowy", "Sci-fi", "Animowany", "Dokumentalny", "Dramat",
+    ...COMMON_FILTERS
 ];
 
 const FILTERS_HORROR = [
     "Zombie", "Slasher", "Duchy", "Opętania", "Wampiry", "Potwory", "Psychologiczny",
-    "Ten rok", "Hity (8.0+)"
+    ...COMMON_FILTERS
 ];
 
 const FILTERS_ACTION = [
     "Superbohaterowie", "Sztuki Walki", "Wyścigi", "Szpiedzy", "Wojenne", "Cyberpunk",
-    "Ten rok", "Hity (8.0+)"
+    ...COMMON_FILTERS
 ];
 
 const FILTERS_COMEDY = [
     "Czarna Komedia", "Parodia", "Romantyczna", "Szkolna", "Świąteczne",
-    "Ten rok", "Hity (8.0+)"
+    ...COMMON_FILTERS
 ];
 
 const FILTERS_SCIFI = [
     "Kosmos", "Obcy", "Podróże w czasie", "Post-Apo", "Sztuczna Inteligencja", "Cyberpunk",
-    "Ten rok", "Hity (8.0+)"
+    ...COMMON_FILTERS
 ];
 
-// 2. MAPA SŁÓW KLUCZOWYCH (TŁUMACZ NA ID TMDB)
+// ---> NOWA LISTA DLA ANIMACJI <---
+const FILTERS_ANIMATION = [
+    "Anime", "Rodzinne", "Dla dorosłych", "Superbohaterowie", "Stop Motion",
+    ...COMMON_FILTERS
+];
+
+// 3. MAPA SŁÓW KLUCZOWYCH
 const KEYWORDS = {
     // HORROR
     "Zombie": "12377", "Slasher": "12339", "Duchy": "9675", "Opętania": "1701", 
@@ -103,7 +116,10 @@ const KEYWORDS = {
     "Szkolna": "6270", "Świąteczne": "207317",
     // SCI-FI
     "Kosmos": "9882", "Obcy": "9951", "Podróże w czasie": "4387", 
-    "Post-Apo": "285366", "Sztuczna Inteligencja": "310", "Cyberpunk": "12190"
+    "Post-Apo": "285366", "Sztuczna Inteligencja": "310", "Cyberpunk": "12190",
+    // ANIMACJE
+    "Anime": "210024", "Dla dorosłych": "207208", "Stop Motion": "3054"
+    // Uwaga: "Rodzinne" jest obsługiwane jako gatunek w getCatalog, a "Superbohaterowie" mają ID wspólne z Akcją
 };
 
 async function fetchTMDB(endpoint, params = "") {
@@ -131,31 +147,32 @@ function formatReleaseDate(dateStr) {
 }
 
 /* =========================
-   CATALOG LOGIC (v16.0 FINAL ENGINE: FILTERS + SORT FIX + CLEAN UI)
+   CATALOG LOGIC (v16.2 FINAL ENGINE: FILTERS + ANIMATION + GENRE FIX)
 ========================= */
 async function getCatalog(catalogId, type, genre, skip = 0) {
     let results = [];
     const regionParams = "&watch_region=PL&region=PL";
     const page = Math.floor(skip / 20) + 1;
     const now = new Date();
-    const currentYear = now.getFullYear(); // np. 2026
+    const currentYear = now.getFullYear(); // 2026
 
     // --- BUDOWANIE PARAMETRÓW FILTROWANIA ---
-    let sortParam = "sort_by=primary_release_date.desc"; // Domyślne sortowanie
-    let extraFilters = "&vote_count.gte=50"; // Podstawowy filtr jakości
+    let sortParam = "sort_by=primary_release_date.desc"; // Domyślnie najnowsze
+    let extraFilters = "&vote_count.gte=50"; // Anty-śmieci
 
     // OBSŁUGA FILTRÓW Z MENU (GENRE)
     if (genre) {
-        // A. SŁOWA KLUCZOWE (ZOMBIE, SLASHER ITD.) - z mapy KEYWORDS
+        // A. SŁOWA KLUCZOWE (ZOMBIE, SLASHER, ANIME ITD.)
         if (KEYWORDS[genre]) {
             extraFilters += `&with_keywords=${KEYWORDS[genre]}`;
         }
         
-        // B. STANDARDOWE GATUNKI (Akcja, Komedia...)
-        else if (["Akcja", "Komedia", "Horror", "Sci-Fi", "Dramat", "Animowany", "Kryminał", "Fantasy", "Przygodowy", "Dokumentalny"].includes(genre)) {
+        // B. STANDARDOWE GATUNKI (Dodałem "Rodzinne" dla Animacji)
+        else if (["Akcja", "Komedia", "Horror", "Sci-fi", "Dramat", "Animowany", "Dokumentalny", "Fanstasy", "Przygodowy", "Rodzinne"].includes(genre)) {
              const genreMap = { 
-                "Akcja": "28", "Komedia": "35", "Horror": "27", "Sci-Fi": "878", "Dramat": "18", 
-                "Animowany": "16", "Kryminał": "80", "Fantasy": "14", "Przygodowy": "12", "Dokumentalny": "99"
+                "Akcja": "28", "Komedia": "35", "Horror": "27", "Sci-fi": "878", "Dramat": "18", 
+                "Animowany": "16", "Kryminał": "80", "Fanstasy": "14", "Przygodowy": "12", 
+                "Dokumentalny": "99", "Rodzinne": "10751"
             };
             if (genreMap[genre]) extraFilters += `&with_genres=${genreMap[genre]}`;
         }
@@ -165,28 +182,28 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         else if (genre === "Dobre (7.0+)") extraFilters += `&vote_average.gte=7.0&vote_count.gte=100`;
         else if (genre === "Reszta (4.5+)") extraFilters += `&vote_average.gte=4.5`;
 
-        // D. LATA (MATEMATYKA DAT)
+        // D. LATA (MATEMATYKA DAT - BAZA 2026)
         else if (genre === "Ten rok") {
-            // Tylko obecny rok
+            // 2026
             extraFilters += `&primary_release_year=${currentYear}`;
             extraFilters += `&first_air_date_year=${currentYear}`;
         }
         else if (genre === "Zeszły rok") {
-            // Tylko poprzedni rok
+            // 2025
             extraFilters += `&primary_release_year=${currentYear - 1}`;
             extraFilters += `&first_air_date_year=${currentYear - 1}`;
         }
-        else if (genre === "Ostatnie 5 lat") {
-            // Zakres: (Rok-6) do (Rok-2) -> np. 2020-2024
-            const start = currentYear - 6;
-            const end = currentYear - 2;
+        else if (genre === "5 lat wstecz") {
+            // 2020 - 2024
+            const start = currentYear - 6; // 2020
+            const end = currentYear - 2;   // 2024
             extraFilters += `&primary_release_date.gte=${start}-01-01&primary_release_date.lte=${end}-12-31`;
             extraFilters += `&first_air_date.gte=${start}-01-01&first_air_date.lte=${end}-12-31`;
         }
-        else if (genre === "Ostatnie 10 lat") {
-            // Zakres: (Rok-11) do (Rok-7) -> np. 2015-2019
-            const start = currentYear - 11;
-            const end = currentYear - 7;
+        else if (genre === "10 lat wstecz") {
+            // 2015 - 2019
+            const start = currentYear - 11; // 2015
+            const end = currentYear - 7;    // 2019
             extraFilters += `&primary_release_date.gte=${start}-01-01&primary_release_date.lte=${end}-12-31`;
             extraFilters += `&first_air_date.gte=${start}-01-01&first_air_date.lte=${end}-12-31`;
         }
@@ -197,8 +214,7 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         // Jeśli brak filtra, domyślnie pokazujemy też przyszłość (+3 miesiące)
         if (!genre) {
             const futureDate = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString().split('T')[0];
-            extraFilters += `&primary_release_date.lte=${futureDate}`; // Tylko limit górny, dolnego brak = nieskończony scroll
-            // Dla seriali first_air_date jest obsługiwane w URL poniżej
+            extraFilters += `&primary_release_date.lte=${futureDate}`; 
         }
 
         const [movies, series] = await Promise.all([
@@ -216,47 +232,52 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         if (catalogId.includes("disney")) providerId = "337";
         if (catalogId.includes("amazon")) providerId = "119";
         
-        // Wykrywamy co pobrać
         const isMovies = catalogId.includes("_movies") || (catalogId.endsWith("_new") && type === 'movie');
         const isSeries = catalogId.includes("_series") || (catalogId.endsWith("_new") && type === 'series');
-        const isMix = catalogId.endsWith("_new"); // Mix tylko dla _new
+        const isMix = catalogId.endsWith("_new"); 
 
         const requests = [];
-        // Dla filmów
         if (isMovies || isMix) {
             requests.push(fetchTMDB("/discover/movie", `with_watch_providers=${providerId}&${sortParam}${extraFilters}&page=${page}${regionParams}`));
         }
-        // Dla seriali (zamieniamy klucz sortowania na first_air_date)
         if (isSeries || isMix) {
             requests.push(fetchTMDB("/discover/tv", `with_watch_providers=${providerId}&${sortParam.replace('primary_release_date', 'first_air_date')}${extraFilters}&page=${page}${regionParams}`));
         }
 
         const responses = await Promise.all(requests);
-        
         responses.forEach(data => {
             if (data?.results) {
-                // Wykrywanie typu, bo discover/movie nie zawsze zwraca media_type
-                results.push(...data.results.map(i => ({
-                    ...i, 
-                    media_type: i.title ? 'movie' : 'tv'
-                })));
+                results.push(...data.results.map(i => ({...i, media_type: i.title ? 'movie' : 'tv'})));
             }
         });
     }
 
-    // --- 3. GATUNKI GLOBALNE (ZACHOWUJEMY STARĄ LOGIKĘ DLA GENRE_*) ---
+    // --- 3. GATUNKI GLOBALNE (Z DEDYKOWANYMI FILTRAMI) ---
     else if (catalogId.startsWith("genre_")) {
         const genreKey = catalogId.replace("genre_", "");
-        const genreId = GENRES[genreKey];
-        // Tutaj też stosujemy sortowanie po dacie i min. głosy
-        const data = await fetchTMDB(`/discover/movie`, `with_genres=${genreId}&sort_by=primary_release_date.desc&vote_count.gte=50&page=${page}${regionParams}`);
+        const baseGenreId = GENRES[genreKey]; // np. 27 dla Horror
+
+        // TU BYŁ PROBLEM: 
+        // Jeśli użytkownik wybrał filtr "Zombie" (Słowo kluczowe), extraFilters ma tylko &with_keywords=...
+        // Ale my jesteśmy w katalogu HORRORY, więc musimy dodać &with_genres=27.
+        // Jeśli użytkownik wybrał filtr "Rodzinne" (Gatunek), extraFilters ma &with_genres=10751.
+        // Wtedy nie dodajemy na siłę gatunku bazowego, bo użytkownik wybrał konkret.
+
+        let finalParams = `${sortParam}${extraFilters}&page=${page}${regionParams}`;
+        
+        // Jeśli w filtrach NIE MA nadpisania gatunku (czyli wybrano np. rok, ocenę albo słowo kluczowe like Zombie),
+        // to dodajemy bazowy gatunek katalogu (np. Horror).
+        if (!finalParams.includes("with_genres=")) {
+            finalParams += `&with_genres=${baseGenreId}`;
+        }
+
+        const data = await fetchTMDB(`/discover/movie`, finalParams);
         results = data?.results || [];
         results = results.map(i => ({...i, media_type: 'movie'}));
     }
     
-    // --- 4. ZWYKŁE KATALOGI PROVIDERÓW (BACKUP) ---
+    // --- 4. LEGACY PROVIDERS (BACKUP) ---
     else if (PROVIDERS[catalogId.split("_")[0]]) {
-        // ... (Logika legacy, rzadko używana przy obecnym setupie)
          const [providerName, subType] = catalogId.split("_");
          const providerId = PROVIDERS[providerName];
          const tmdbType = (subType === 'series' || type === 'series') ? 'tv' : 'movie';
@@ -265,48 +286,37 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
          results = results.map(i => ({...i, media_type: tmdbType}));
     }
 
-    // --- 5. FIX SORTOWANIA (KLUCZOWE DLA DAT) ---
-    // TMDB zwraca posortowane paczki, ale po złączeniu (Film+Serial) kolejność się psuje.
-    // Tutaj wymuszamy sortowanie absolutne: Najnowsze na górze.
+    // --- 5. FIX SORTOWANIA (NAJNOWSZE ZAWSZE NA GÓRZE) ---
     results = results.sort((a, b) => {
         const dateA = new Date(a.release_date || a.first_air_date || "1900-01-01");
         const dateB = new Date(b.release_date || b.first_air_date || "1900-01-01");
-        return dateB - dateA; // Malejąco (2026 -> 2025)
+        return dateB - dateA; 
     });
 
     // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) ---
     return results.map(item => {
         const isMovie = item.media_type === 'movie';
         const date = item.release_date || item.first_air_date;
-        const year = (date || "").substring(0, 4);
-        
         let name = item.title || item.name;
-        let descriptionPrefix = ""; // To dodamy do opisu
+        let descriptionPrefix = ""; 
 
-        // Logika wyglądu dla katalogów Premium/Premiery
         if (catalogId === "this_month" || catalogId.endsWith("_new") || catalogId.endsWith("_movies") || catalogId.endsWith("_series")) {
             const releaseDate = new Date(date);
             const nowTime = new Date(); 
-            
-            // Jeśli przyszłość -> ⏳ w tytule
             if (releaseDate > nowTime) {
                 name = `⏳ ${name}`;
                 descriptionPrefix = "⚠️ PREMIERA WKRÓTCE | ";
             } else {
-                // Jeśli przeszłość -> Czysty tytuł, info w opisie
                 descriptionPrefix = isMovie ? "🎬 FILM | " : "📺 SERIAL | ";
             }
         }
 
-        const originalDesc = item.overview || "Brak opisu.";
-        const fullDescription = `${descriptionPrefix}${originalDesc}`;
-
         return {
             id: `tmdb:${item.id}`,
             type: isMovie ? 'movie' : 'series',
-            name: name, // Czysty tytuł (ew. z emoji ⏳)
+            name: name, 
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            description: fullDescription, // Info FILM/SERIAL jest tu
+            description: `${descriptionPrefix}${item.overview || "Brak opisu."}`,
             releaseInfo: formatReleaseDate(date)
         };
     }).filter(i => i.poster);
@@ -632,7 +642,7 @@ app.get("/manifest.json", (req, res) => {
             { type: "movie", id: "genre_comedy", name: "KOMEDIE", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_COMEDY }] },
             { type: "movie", id: "genre_scifi", name: "SCI-FI", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_SCIFI }] },
             { type: "movie", id: "genre_action", name: "AKCJA", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_ACTION }] },
-            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extraSupported: ["skip"] } // Tu zostawiamy bez filtrów lub standard
+            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extraSupported: ["skip"] }, { name: "genre", options: FILTERS_ANIMATION }] }
         ]
     });
 });
