@@ -634,15 +634,15 @@ app.get("/manifest.json", (req, res) => {
             { type: "movie", id: "this_month", name: "◢◤PREMIERY", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
             { type: "movie", id: "netflix_movies", name: "◢◤NETFLIX", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
             { type: "series", id: "netflix_series", name: "◢◤NETFLIX", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
-            { type: "movie", id: "netflix_new", name: "◢◤NETFLIX | NOWOŚCI", extraSupported: ["skip"] },
+            { type: "movie", id: "netflix_new", name: "◢◤NETFLIX | NOWOŚCI", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
 
             { type: "movie", id: "disney_movies", name: "◢◤DISNEY+", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
             { type: "series", id: "disney_series", name: "◢◤DISNEY+", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
-            { type: "movie", id: "disney_new", name: "◢◤DISNEY+ | NOWOŚCI", extraSupported: ["skip"] },
+            { type: "movie", id: "disney_new", name: "◢◤DISNEY+ | NOWOŚCI", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
 
             { type: "movie", id: "amazon_movies", name: "◢◤AMZN PRIME", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
             { type: "series", id: "amazon_series", name: "◢◤AMZN PRIME", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
-            { type: "movie", id: "amazon_new", name: "◢◤AMZN PRIME | NOWOŚCI", extraSupported: ["skip"] },
+            { type: "movie", id: "amazon_new", name: "◢◤AMZN PRIME | NOWOŚCI", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_STANDARD }] },
 
             // 3. GATUNKI SPECJALNE (DEDYKOWANE FILTRY!)
             { type: "movie", id: "genre_horror", name: "HORRORY", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_HORROR }] },
