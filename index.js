@@ -167,7 +167,7 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
     if (catalogId === "trakt_mix") {
         try {
             // 1. Pobieramy 3 ostatnio oglądane filmy z Trakt
-            const traktRes = await fetch(`https://api.trakt.tv/users/${TRAKT_USERNAME}/history/movies?limit=3`, {
+            const traktRes = await fetch(`https://api.trakt.tv/users/${TRAKT_USERNAME}/history/movies?limit=1`, {
                 headers: {
                     "Content-Type": "application/json",
                     "trakt-api-version": "2",
