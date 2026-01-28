@@ -642,7 +642,7 @@ app.get("/manifest.json", (req, res) => {
             { type: "movie", id: "genre_comedy", name: "KOMEDIE", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_COMEDY }] },
             { type: "movie", id: "genre_scifi", name: "SCI-FI", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_SCIFI }] },
             { type: "movie", id: "genre_action", name: "AKCJA", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_ACTION }] },
-            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extraSupported: ["skip"] }, { name: "genre", options: FILTERS_ANIMATION }] }
+            { type: "movie", id: "genre_animation", name: "ANIMOWANE", extra: [{ name: "skip" }, { name: "genre", options: FILTERS_ANIMATION }] }
         ]
     });
 });
