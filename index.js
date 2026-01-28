@@ -311,10 +311,10 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
             const releaseDate = new Date(date);
             const nowTime = new Date(); 
             if (releaseDate > nowTime) {
-                name = `⏳ ${name}`;
-                descriptionPrefix = "⚠️ PREMIERA WKRÓTCE | ";
+                name = `${name}`;
+                descriptionPrefix = "PREMIERA WKRÓTCE | ";
             } else {
-                descriptionPrefix = isMovie ? "🎬 FILM | " : "📺 SERIAL | ";
+                descriptionPrefix = isMovie ? "FILM | " : "SERIAL | ";
             }
         }
 
