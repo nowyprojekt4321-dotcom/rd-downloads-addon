@@ -138,6 +138,16 @@ async function fetchTMDB(endpoint, params = "") {
     } catch (e) { return null; }
 }
 
+// --- POMOCNIK: POBIERANIE ID IMDB ---
+async function getImdbId(tmdbId, type) {
+    if (!tmdbId) return null;
+    const endpoint = type === 'movie' ? 'movie' : 'tv';
+    try {
+        const data = await fetchTMDB(`/${endpoint}/${tmdbId}/external_ids`);
+        return data?.imdb_id || null;
+    } catch (e) { return null; }
+}
+
 // Helper: Data premiery (tylko rok lub DD.MM)
 function formatReleaseDate(dateStr) {
     if (!dateStr) return "";
@@ -300,9 +310,16 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         return dateB - dateA; 
     });
 
-    // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) ---
-    return results.map(item => {
+    // --- MAPOWANIE WYNIKÓW Z TŁUMACZENIEM NA IMDB ---
+    // Najpierw pobieramy IMDb ID dla wszystkich wyników równolegle
+    const enrichedResults = await Promise.all(results.map(async (item) => {
         const isMovie = item.media_type === 'movie';
+        
+        // Próba pobrania IMDb ID (żeby AIO/Torrentio działało)
+        let finalId = `tmdb:${item.id}`;
+        const imdbId = await getImdbId(item.id, isMovie ? 'movie' : 'series');
+        if (imdbId) finalId = imdbId;
+
         const date = item.release_date || item.first_air_date;
         let name = item.title || item.name;
         let descriptionPrefix = ""; 
@@ -319,30 +336,53 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         }
 
         return {
-            id: `tmdb:${item.id}`,
+            id: finalId, // <-- TERAZ WYSYŁAMY tt... JEŚLI JEST DOSTĘPNE
             type: isMovie ? 'movie' : 'series',
             name: name, 
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
             description: `${descriptionPrefix}${item.overview || "Brak opisu."}`,
             releaseInfo: formatReleaseDate(date)
         };
-    }).filter(i => i.poster);
+    }));
+
+    return enrichedResults.filter(i => i.poster);
 }
 
 /* =========================
    META HANDLER (NAPRAWA SERIALI + ID DLA INNYCH WTYCZEK)
 ========================= */
-async function getMetaFromTMDB(tmdbId, type) {
-    const tmdbType = type === 'series' ? 'tv' : 'movie';
-    const id = tmdbId.replace("tmdb:", "");
-    
-    // Kluczowe: Pobieramy external_ids ORAZ sezony
+async function getMetaFromTMDB(idOrTmdb, type) {
+    let id = idOrTmdb;
+    let tmdbType = type === 'series' ? 'tv' : 'movie';
+    let realId = id; // Domyślnie to co dostaliśmy (np. tt12345)
+
+    // Jeśli dostaliśmy tmdb:123, to wyciągamy numer
+    if (id.startsWith("tmdb:")) {
+        id = id.replace("tmdb:", "");
+    } 
+    // Jeśli dostaliśmy tt12345 (IMDb), musimy znaleźć numer TMDB
+    else if (id.startsWith("tt")) {
+        const findData = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
+        const hit = (type === 'series') ? findData?.tv_results?.[0] : findData?.movie_results?.[0];
+        if (hit) {
+            id = hit.id; // Mamy numer TMDB!
+        } else {
+            return null; // Nie znaleziono
+        }
+    }
+
+    // Teraz `id` to czysty numer TMDB (np. 12345)
+    // Pobieramy detale...
     const data = await fetchTMDB(`/${tmdbType}/${id}`, "append_to_response=external_ids");
     if (!data) return null;
 
-    // Ustalamy "Główne ID" - jeśli mamy IMDb (tt...), to go używamy. Jak nie, to TMDB.
-    // To jest kluczowe dla AIO|PL i innych wtyczek.
-    const realId = data.external_ids?.imdb_id || `tmdb:${id}`;
+    // Upewniamy się, że główne ID w mecie to IMDb (jeśli istnieje)
+    // To ważne dla AIO/Torrentio
+    if (data.external_ids?.imdb_id) {
+        realId = data.external_ids.imdb_id;
+    } else {
+        realId = `tmdb:${id}`;
+    }
 
     const meta = {
         id: realId,
@@ -697,26 +737,24 @@ app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 
 app.get("/meta/:type/:id.json", async (req, res) => {
     const { type, id } = req.params;
-    if (id.startsWith("tmdb:")) return res.json({ meta: await getMetaFromTMDB(id, type) });
-    
-    // Obsługa IMDb ID (konwersja na TMDB dla pełnych danych o odcinkach)
-    if (id.startsWith("tt")) {
-        const data = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
-        const hit = data?.movie_results?.[0] || data?.tv_results?.[0];
-        if (hit) {
-            const details = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
-            if (details) { details.id = id; return res.json({ meta: details }); }
-        }
-    }
+    // Teraz getMetaFromTMDB obsłuży i "tmdb:..." i "tt..."
+    const meta = await getMetaFromTMDB(id, type);
+    if (meta) return res.json({ meta });
     res.status(404).send();
 });
 
 function parseSeasonEpisode(id) { 
-    // Obsługa formatu TMDB: tmdb:123:1:5 (ID:Sezon:Odcinek)
+    // Obsługa ID z IMDb (tt12345:1:5)
+    if (id.startsWith("tt")) {
+        const p = id.split(":");
+        return { baseId: p[0], season: p[1], episode: p[2] };
+    }
+    // Obsługa TMDB (tmdb:123:1:5)
     if (id.startsWith("tmdb:") && id.split(":").length >= 4) {
         const p = id.split(":");
         return { baseId: `tmdb:${p[1]}`, season: p[2], episode: p[3] }; 
     }
+    // Fallback
     const p = id.split(":"); 
     return { baseId: p[0], season: p[1], episode: p[2] }; 
 }
