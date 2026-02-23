@@ -411,7 +411,10 @@ function dashboardHostersOnly(downloads) { return downloads.filter(d => !d.link.
 function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
   const s = Number(season), e = Number(episode);
-  return new RegExp(`S0*${s}[^0-9]*E0*${e}(?![0-9])`, "i").test(filename) || new RegExp(`\\b${s}x${e}\\b`, "i").test(filename);
+
+  // ZMIANA: S[0O]* zamiast S0*
+  return new RegExp(`S[0O]*${s}[^0-9]*E0*${e}(?![0-9])`, "i").test(filename)
+      || new RegExp(`\\b${s}x${e}\\b`, "i").test(filename);
 }
 function detectType(filename) { return /S\d{2}/i.test(filename) ? "series" : "movie"; }
 function formatBytes(bytes) { if (!+bytes) return '0 B'; const k = 1024; const i = Math.floor(Math.log(bytes) / Math.log(k)); return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${['B', 'KB', 'MB', 'GB', 'TB'][i]}`; }
