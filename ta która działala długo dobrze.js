@@ -725,88 +725,43 @@ app.get("/stream/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
   const { baseId, season, episode } = parseSeasonEpisode(id);
   const streams = [];
-
-  // 1) DOWNLOADS (hostery / rapidgator itd.) — tutaj ZAWSZE używamy f.download
-  //    bo to jest pełny direct link z nazwą pliku + rozszerzeniem (Just Player to lubi)
+  
+  // 1. SZUKANIE W CACHE (MOJE PLIKI)
+  // Musimy znaleźć odpowiednie ID z cache (IMDb lub TMDB)
+  // Uproszczenie: Szukamy po prostu pasującego assignedId w grupach
+  
+  // Dla downloadów
   for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
-
-    // meta.id może być tt..., a meta.tmdb_id to numeric string
+    // Sprawdzamy czy meta.id pasuje do baseId (może być tt... lub tmdb:...)
     if (meta && (meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) {
       const smartInfo = getStreamInfo(f.filename, f.filesize);
       const title = `${f.filename}\n${smartInfo}`;
       const name = "💎 MOJE RD";
-
       if (type === "series") {
-        if (matchesEpisode(f.filename, season, episode)) {
-          streams.push({ name, title, url: f.download });
-        }
-      } else {
-        streams.push({ name, title, url: f.download });
-      }
+        if (matchesEpisode(f.filename, season, episode)) streams.push({ name: name, title: title, url: f.download });
+      } else { streams.push({ name: name, title: title, url: f.download }); }
     }
   }
 
-  // 2) TORRENTY — dla filmów dodajemy nazwę pliku do URL wrappera (/play/…/FILENAME)
-  //    żeby Just Player nie gubił się na linku bez rozszerzenia/nazwy.
-  //    Dla seriali zostawiamy jak było.
+  // Dla torrentów
   for (const t of ALL_TORRENTS_CACHE) {
-    if (t.status !== "downloaded") continue;
-
-    const meta = METADATA_CACHE[t.id];
-    if (!meta) continue;
-
-    if (!(meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) continue;
-    if (!t.files || !t.links) continue;
-
-    t.files.forEach((file, index) => {
-      const match = (type === "series") ? matchesEpisode(file.path, season, episode) : true;
-      if (!match) return;
-
-      const filename = path.basename(file.path);
-      const fname = encodeURIComponent(filename); // nazwa + .mkv itp.
-
-      // ✅ FILMY: wrapper URL z nazwą pliku
-      // ✅ SERIALE: wrapper URL bez nazwy (jak wcześniej)
-      const myUrl =
-        type === "movie"
-          ? `${req.protocol}://${req.get("host")}/play/t/${t.id}/${index}/${fname}`
-          : `${req.protocol}://${req.get("host")}/play/t/${t.id}/${index}`;
-
-      const title = `[TORRENT] ${filename}\n${getStreamInfo(file.path, file.bytes)}`;
-      streams.push({ name: "💎 CHMURA", title, url: myUrl });
-    });
+      if (t.status !== 'downloaded') continue;
+      const meta = METADATA_CACHE[t.id];
+      if (meta && (meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) {
+          if (t.files && t.links) {
+              t.files.forEach((file, index) => {
+                  const match = (type === "series") ? matchesEpisode(file.path, season, episode) : true;
+                  if (match) {
+                      const myUrl = `${req.protocol}://${req.get('host')}/play/t/${t.id}/${index}`;
+                      const title = `[TORRENT] ${path.basename(file.path)}\n${getStreamInfo(file.path, file.bytes)}`;
+                      streams.push({ name: "💎 CHMURA", title, url: myUrl });
+                  }
+              });
+          }
+      }
   }
-
   res.json({ streams });
-});
-
-// ✅ NOWE: movie wrapper z nazwą pliku w URL (Just Player fix)
-// /play/t/:tid/:idx/:fname
-app.get("/play/t/:tid/:idx/:fname", async (req, res) => {
-  const { tid, idx } = req.params;
-  const torrent = ALL_TORRENTS_CACHE.find(t => t.id === tid);
-  if (!torrent || !torrent.links || !torrent.links[idx]) return res.status(404).send("File not found.");
-
-  try {
-    const params = new URLSearchParams();
-    params.append("link", torrent.links[idx]);
-
-    const r = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${RD_TOKEN}` },
-      body: params
-    });
-
-    const data = await r.json();
-
-    // dalej zawsze redirect na data.download (pełna nazwa + ext)
-    if (data.download) return res.redirect(data.download);
-
-    return res.status(500).send("RD Error");
-  } catch (e) {
-    return res.status(500).send("Server Error");
-  }
 });
 
 app.get("/play/t/:tid/:idx", async (req, res) => {
