@@ -9,6 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3001;
 const RD_TOKEN = process.env.RD_TOKEN;
 const TMDB_KEY = process.env.TMDB_KEY;
@@ -440,6 +441,33 @@ function getSearchQuery(filename) {
   return clean;
 }
 
+function getBaseUrl(req) {
+  const xfProto = req.headers["x-forwarded-proto"];
+  const proto = (xfProto ? xfProto.split(",")[0].trim() : req.protocol) || "https";
+  return `${proto}://${req.get("host")}`;
+}
+
+async function rdUnrestrict(link) {
+  const params = new URLSearchParams();
+  params.append("link", link);
+
+  const r = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RD_TOKEN}` },
+    body: params
+  });
+
+  const data = await r.json().catch(() => null);
+
+  if (!r.ok || !data || !data.download) {
+    // zostawiamy debug info w logach serwera
+    console.warn("RD unrestrict failed:", r.status, data);
+    return null;
+  }
+
+  return data.download;
+}
+
 /* =========================
    METADATA CACHE FILLERS
 ========================= */
@@ -726,30 +754,27 @@ app.get("/stream/:type/:id.json", async (req, res) => {
   const { baseId, season, episode } = parseSeasonEpisode(id);
   const streams = [];
 
-  // 1) DOWNLOADS (hostery / rapidgator itd.) — tutaj ZAWSZE używamy f.download
-  //    bo to jest pełny direct link z nazwą pliku + rozszerzeniem (Just Player to lubi)
+  // 1) DOWNLOADS — ZAWSZE f.download (działa)
   for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
+    if (!meta) continue;
 
-    // meta.id może być tt..., a meta.tmdb_id to numeric string
-    if (meta && (meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) {
-      const smartInfo = getStreamInfo(f.filename, f.filesize);
-      const title = `${f.filename}\n${smartInfo}`;
-      const name = "💎 MOJE RD";
+    if (!(meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) continue;
 
-      if (type === "series") {
-        if (matchesEpisode(f.filename, season, episode)) {
-          streams.push({ name, title, url: f.download });
-        }
-      } else {
+    const smartInfo = getStreamInfo(f.filename, f.filesize);
+    const title = `${f.filename}\n${smartInfo}`;
+    const name = "💎 MOJE RD";
+
+    if (type === "series") {
+      if (matchesEpisode(f.filename, season, episode)) {
         streams.push({ name, title, url: f.download });
       }
+    } else {
+      streams.push({ name, title, url: f.download });
     }
   }
 
-  // 2) TORRENTY — dla filmów dodajemy nazwę pliku do URL wrappera (/play/…/FILENAME)
-  //    żeby Just Player nie gubił się na linku bez rozszerzenia/nazwy.
-  //    Dla seriali zostawiamy jak było.
+  // 2) TORRENTY — ZAWSZE DIRECT z RD (TAK JAK DOWNLOADS)
   for (const t of ALL_TORRENTS_CACHE) {
     if (t.status !== "downloaded") continue;
 
@@ -759,66 +784,32 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     if (!(meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) continue;
     if (!t.files || !t.links) continue;
 
-    t.files.forEach((file, index) => {
-      const match = (type === "series") ? matchesEpisode(file.path, season, episode) : true;
-      if (!match) return;
+    // UWAGA: t.files to "selected files", ale t.links z RD może mieć inną kolejność
+    // Najbezpieczniej iterować po indexie t.links i brać t.files[index] jeśli istnieje
+    for (let index = 0; index < t.links.length; index++) {
+      const file = t.files[index];
+      if (!file) continue;
+
+      const match = (type === "series")
+        ? matchesEpisode(file.path, season, episode)
+        : true;
+      if (!match) continue;
 
       const filename = path.basename(file.path);
-      const fname = encodeURIComponent(filename); // nazwa + .mkv itp.
-
-      // ✅ FILMY: wrapper URL z nazwą pliku
-      // ✅ SERIALE: wrapper URL bez nazwy (jak wcześniej)
-      const myUrl =
-        type === "movie"
-          ? `${req.protocol}://${req.get("host")}/play/t/${t.id}/${index}/${fname}`
-          : `${req.protocol}://${req.get("host")}/play/t/${t.id}/${index}`;
-
       const title = `[TORRENT] ${filename}\n${getStreamInfo(file.path, file.bytes)}`;
-      streams.push({ name: "💎 CHMURA", title, url: myUrl });
-    });
+
+      const direct = await rdUnrestrict(t.links[index]);
+      if (direct) {
+        streams.push({
+          name: "💎 CHMURA",
+          title,
+          url: direct
+        });
+      }
+    }
   }
 
-  res.json({ streams });
-});
-
-// ✅ NOWE: movie wrapper z nazwą pliku w URL (Just Player fix)
-// /play/t/:tid/:idx/:fname
-app.get("/play/t/:tid/:idx/:fname", async (req, res) => {
-  const { tid, idx } = req.params;
-  const torrent = ALL_TORRENTS_CACHE.find(t => t.id === tid);
-  if (!torrent || !torrent.links || !torrent.links[idx]) return res.status(404).send("File not found.");
-
-  try {
-    const params = new URLSearchParams();
-    params.append("link", torrent.links[idx]);
-
-    const r = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${RD_TOKEN}` },
-      body: params
-    });
-
-    const data = await r.json();
-
-    // dalej zawsze redirect na data.download (pełna nazwa + ext)
-    if (data.download) return res.redirect(data.download);
-
-    return res.status(500).send("RD Error");
-  } catch (e) {
-    return res.status(500).send("Server Error");
-  }
-});
-
-app.get("/play/t/:tid/:idx", async (req, res) => {
-    const { tid, idx } = req.params;
-    const torrent = ALL_TORRENTS_CACHE.find(t => t.id === tid);
-    if (!torrent || !torrent.links || !torrent.links[idx]) return res.status(404).send("File not found.");
-    try {
-        const params = new URLSearchParams(); params.append('link', torrent.links[idx]);
-        const r = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", { method: "POST", headers: { Authorization: `Bearer ${RD_TOKEN}` }, body: params });
-        const data = await r.json();
-        if (data.download) res.redirect(data.download); else res.status(500).send("RD Error");
-    } catch (e) { res.status(500).send("Server Error"); }
+  return res.json({ streams });
 });
 
 app.listen(PORT, "0.0.0.0", () => { console.log("✅ RDD ULTIMATE v15.0 (New Engine) RUNNING"); syncAllDownloads(); setInterval(syncAllDownloads, 15 * 60 * 1000); });
