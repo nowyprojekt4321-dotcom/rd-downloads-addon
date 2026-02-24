@@ -768,8 +768,8 @@ app.get("/manifest.json", (req, res) => {
     const genreFilters = Object.keys(GENRES).map(g => g.charAt(0).toUpperCase() + g.slice(1));
     
     res.json({
-        id: "community.rd.manager.v15",
-        version: "15.0.0",
+        id: "community.rd.manager.v15.1",
+        version: "15.0.1",
         name: "RDD ULTIMATE PL",
         description: "Manager + Premium VOD + Kino",
         logo: "https://rd-downloads-addon.onrender.com/assets/logo.png",
