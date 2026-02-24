@@ -520,16 +520,39 @@ async function fetchCinemetaReleaseInfo(imdbId) {
   return rel;
 }
 
+// --- GENRES PL (Cinemeta -> PL) ---
+const GENRE_PL = {
+  Drama: "Dramat",
+  Fantasy: "Fantasy",
+  Mystery: "Tajemnica",
+  "Science Fiction": "Sci-fi",
+  "Sci-Fi": "Sci-fi",
+  Adventure: "Przygodowy",
+  Action: "Akcja",
+  Comedy: "Komedia",
+  Horror: "Horror",
+  Thriller: "Thriller",
+  Crime: "Kryminał",
+  Romance: "Romans",
+  Family: "Rodzinny",
+  Animation: "Animacja",
+  War: "Wojenny",
+  History: "Historyczny",
+  Music: "Muzyczny",
+  Documentary: "Dokumentalny",
+  Western: "Western",
+};
+
+function translateGenresPL(genres) {
+  if (!Array.isArray(genres)) return genres;
+  return genres.map((g) => GENRE_PL[g] || g);
+}
+
 function applyCinemetaHeaderOnly(tmdbMeta, cineMeta) {
   if (!tmdbMeta || !cineMeta) return tmdbMeta;
 
-  // Cinemeta: runtime zwykle "45 min" (string) — zostawiamy
   const runtime = cineMeta.runtime || tmdbMeta.runtime;
-
-  // Cinemeta: releaseInfo często "2016–2018" lub "2016-2018"
   const releaseInfo = cineMeta.releaseInfo || tmdbMeta.releaseInfo;
-
-  // rating: Cinemeta ma imdbRating
   const imdbRating = cineMeta.imdbRating ?? tmdbMeta.imdbRating;
   const ratings = cineMeta.ratings || tmdbMeta.ratings;
 
@@ -539,7 +562,7 @@ function applyCinemetaHeaderOnly(tmdbMeta, cineMeta) {
     runtime,
     imdbRating,
     ratings,
-    genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres)
+    genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres),
   };
 }
 
