@@ -346,23 +346,24 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
 }
 
 /* =========================
-   META HANDLER (NAPRAWA SERIALI + ID DLA INNYCH WTYCZEK)
+   META HANDLER (STABILNE ID = BRAK FLICKERA + STREAM ADDONS OK)
 ========================= */
-async function getMetaFromTMDB(tmdbId, type) {
+async function getMetaFromTMDB(tmdbId, type, requestedId) {
   const tmdbType = type === "series" ? "tv" : "movie";
   const idNum = String(tmdbId).replace("tmdb:", "");
 
-  // external_ids potrzebne do imdb_id
   const data = await fetchTMDB(`/${tmdbType}/${idNum}`, "append_to_response=external_ids");
   if (!data) return null;
 
   const imdbId = data.external_ids?.imdb_id || null;
 
-  // UWAGA: meta.id = tmdb:... (bez flickera)
+  // 🔥 KLUCZ: meta.id = dokładnie to, co przyszło w requeście (tt... albo tmdb:...)
+  const stableId = requestedId || `tmdb:${idNum}`;
+
   const meta = {
-    id: `tmdb:${idNum}`,
+    id: stableId,
     tmdb_id: idNum,
-    imdb_id: imdbId, // trzymamy tt... osobno
+    imdb_id: imdbId,
     type,
     name: data.title || data.name,
     poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
@@ -372,7 +373,7 @@ async function getMetaFromTMDB(tmdbId, type) {
     genres: Array.isArray(data.genres) ? data.genres.map(g => g.name) : []
   };
 
-  // Serial: odcinki MUSZĄ mieć bazę tmdb:... (żeby nic nie rozjechało)
+  // SERIAL: odcinki dziedziczą bazę stableId (tt... lub tmdb:...) -> spójnie i bez przeskoków
   if (type === "series" && Array.isArray(data.seasons)) {
     meta.videos = [];
 
@@ -383,22 +384,22 @@ async function getMetaFromTMDB(tmdbId, type) {
     const seasonsData = await Promise.all(seasonPromises);
 
     seasonsData.forEach(season => {
-      if (season && Array.isArray(season.episodes)) {
-        season.episodes.forEach(ep => {
-          meta.videos.push({
-            id: `tmdb:${idNum}:${season.season_number}:${ep.episode_number}`,
-            title: ep.name,
-            released: ep.air_date ? new Date(ep.air_date).toISOString() : null,
-            season: season.season_number,
-            episode: ep.episode_number,
-            overview: ep.overview,
-            thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
-          });
+      if (!season?.episodes) return;
+
+      season.episodes.forEach(ep => {
+        meta.videos.push({
+          id: `${stableId}:${season.season_number}:${ep.episode_number}`,
+          title: ep.name,
+          released: ep.air_date ? new Date(ep.air_date).toISOString() : null,
+          season: season.season_number,
+          episode: ep.episode_number,
+          overview: ep.overview,
+          thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
         });
-      }
+      });
     });
 
-    meta.videos.sort((a,b) => (a.season - b.season) || (a.episode - b.episode));
+    meta.videos.sort((a, b) => (a.season - b.season) || (a.episode - b.episode));
   }
 
   return meta;
@@ -814,59 +815,42 @@ app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 app.get("/meta/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
 
-  // 1) Request TMDB: zawsze baza TMDB, Cinemeta tylko nagłówek
-  if (id.startsWith("tmdb:")) {
-    const tmdbMeta = await getMetaFromTMDB(id, type);
-    if (!tmdbMeta) return res.status(404).send();
+  try {
+    // 1) request tmdb:... -> stabilne tmdb:... (bez przeskoków)
+    if (id.startsWith("tmdb:")) {
+      const tmdbMeta = await getMetaFromTMDB(id, type, id);
+      if (!tmdbMeta) return res.status(404).send();
 
-    const imdbId = tmdbMeta.imdb_id;
-    if (imdbId && imdbId.startsWith("tt")) {
-      const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
-      if (cine) {
-        // tylko nagłówek
-        tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
-        tmdbMeta.runtime = cine.runtime || tmdbMeta.runtime;
-        tmdbMeta.imdbRating = cine.imdbRating ?? tmdbMeta.imdbRating;
-        tmdbMeta.ratings = cine.ratings || tmdbMeta.ratings;
-        tmdbMeta.genres = translateGenresPL(cine.genres || tmdbMeta.genres);
-      } else {
-        tmdbMeta.genres = translateGenresPL(tmdbMeta.genres);
+      // Cinemeta nagłówek, ale ID zostaje stabilne
+      const imdbId = tmdbMeta.imdb_id;
+      if (imdbId && imdbId.startsWith("tt")) {
+        const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaFull(type === "movie" ? "series" : "movie", imdbId);
+        if (cine) tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
       }
-    } else {
-      tmdbMeta.genres = translateGenresPL(tmdbMeta.genres);
+
+      return res.json({ meta: tmdbMeta });
     }
 
-    // KLUCZ: meta.id zostaje tmdb:... => brak flickera
-    return res.json({ meta: tmdbMeta });
-  }
+    // 2) request tt... -> mapujemy na TMDB, ale zwracamy meta.id = tt... (stabilnie)
+    if (id.startsWith("tt")) {
+      const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
+      const hit = (type === "movie" ? find?.movie_results?.[0] : find?.tv_results?.[0]) || find?.movie_results?.[0] || find?.tv_results?.[0];
+      if (!hit?.id) return res.status(404).send();
 
-  // 2) Request IMDb (tt...): mapujemy na TMDB i dalej robimy to samo
-  if (id.startsWith("tt")) {
-    const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
-    const hit = find?.movie_results?.[0] || find?.tv_results?.[0];
-    if (!hit) return res.status(404).send();
+      const tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type, id);
+      if (!tmdbMeta) return res.status(404).send();
 
-    const tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
-    if (!tmdbMeta) return res.status(404).send();
+      // Cinemeta nagłówek (2016–2018 itd.), ID zostaje tt...
+      const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaFull(type === "movie" ? "series" : "movie", id);
+      if (cine) tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
 
-    // tu też nakładamy nagłówek cinemety po tt...
-    const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaAuto(id);
-    if (cine) {
-      tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
-      tmdbMeta.runtime = cine.runtime || tmdbMeta.runtime;
-      tmdbMeta.imdbRating = cine.imdbRating ?? tmdbMeta.imdbRating;
-      tmdbMeta.ratings = cine.ratings || tmdbMeta.ratings;
-      tmdbMeta.genres = translateGenresPL(cine.genres || tmdbMeta.genres);
-    } else {
-      tmdbMeta.genres = translateGenresPL(tmdbMeta.genres);
+      return res.json({ meta: tmdbMeta });
     }
 
-    // UWAGA: żeby też nie było flickera — zwracamy tmdb:... (nie tt...)
-    // Jeśli koniecznie chcesz tt... przy request tt..., to wróci flicker.
-    return res.json({ meta: tmdbMeta });
+    return res.status(404).send();
+  } catch (e) {
+    return res.status(404).send();
   }
-
-  return res.status(404).send();
 });
 
 function parseSeasonEpisode(id) { 
