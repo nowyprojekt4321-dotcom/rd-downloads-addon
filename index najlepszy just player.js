@@ -486,6 +486,29 @@ async function fetchCinemeta(idOrName) {
   return null;
 }
 
+function applyCinemetaHeaderOnly(tmdbMeta, cineMeta) {
+  if (!tmdbMeta || !cineMeta) return tmdbMeta;
+
+  // Cinemeta: runtime zwykle "45 min" (string) — zostawiamy
+  const runtime = cineMeta.runtime || tmdbMeta.runtime;
+
+  // Cinemeta: releaseInfo często "2016–2018" lub "2016-2018"
+  const releaseInfo = cineMeta.releaseInfo || tmdbMeta.releaseInfo;
+
+  // rating: Cinemeta ma imdbRating
+  const imdbRating = cineMeta.imdbRating ?? tmdbMeta.imdbRating;
+  const ratings = cineMeta.ratings || tmdbMeta.ratings;
+
+  return {
+    ...tmdbMeta,
+    releaseInfo,
+    runtime,
+    imdbRating,
+    ratings,
+    genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres)
+  };
+}
+
 /* =========================
    MANAGER UI (HYBRID)
 ========================= */
