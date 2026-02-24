@@ -320,24 +320,29 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
 
     // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) ---
     const metas = await Promise.all(results.map(async (item) => {
-    const isMovie = item.media_type === "movie";
-    const date = item.release_date || item.first_air_date;
+      const isMovie = item.media_type === "movie";
+      const date = item.release_date || item.first_air_date;
 
-    const tmdbType = isMovie ? "movie" : "tv";
-    const imdbId = await getImdbIdFromTMDB(tmdbType, item.id);
-    const cineRelease = imdbId ? await fetchCinemetaReleaseInfo(imdbId) : null;
+      const tmdbType = isMovie ? "movie" : "tv";
+      const imdbId = await getImdbIdFromTMDB(tmdbType, item.id);
 
-    return {
-      id: `tmdb:${item.id}`,          // ⬅️ ZOSTAJE TMDB (zero flickera)
-      type: isMovie ? "movie" : "series",
-      name: item.title || item.name,
-      poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-      description: item.overview || "Brak opisu.",
-      releaseInfo: cineRelease || formatReleaseDate(date)  // ⬅️ tu jedyna zmiana wizualna
-    };
-  }));
+      // 🔥 dla stream-addonów: preferuj tt... (Torrentio/Zilean/TorrentGalaxy)
+      const finalId = (imdbId && imdbId.startsWith("tt")) ? imdbId : `tmdb:${item.id}`;
 
-  return metas.filter(i => i.poster);
+      // 🔥 releaseInfo: z Cinemeta jeśli jest, fallback jak było
+      const cineRelease = imdbId ? await fetchCinemetaReleaseInfo(imdbId) : null;
+
+      return {
+        id: finalId,
+        type: isMovie ? "movie" : "series",
+        name: item.title || item.name,
+        poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+        description: item.overview || "Brak opisu.",
+        releaseInfo: cineRelease || formatReleaseDate(date),
+      };
+    }));
+
+    return metas.filter(i => i.poster);
 }
 
 /* =========================
