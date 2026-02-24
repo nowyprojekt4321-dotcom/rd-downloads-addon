@@ -337,24 +337,22 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         }
       }
 
-      // 1) TMDB -> IMDb (tt...) żeby dało się pobrać Cinemeta releaseInfo
+      // 1) TMDB -> IMDb (tt...) (już to masz)
       const tmdbType = isMovie ? "movie" : "tv";
       const imdbId = await getImdbIdFromTMDB(tmdbType, item.id);
 
-      // 2) Cinemeta releaseInfo (np. "2016–2018") z cache
-      const cineRelease = imdbId ? await fetchCinemetaReleaseInfo(imdbId) : null;
+      // 2) ID kafelka: tt... jeśli jest, inaczej tmdb:...
+      const finalId = (imdbId && String(imdbId).startsWith("tt")) ? imdbId : `tmdb:${item.id}`;
 
       return {
-        // UWAGA: zostawiamy ID jako tmdb:... żeby nie zmieniać zachowania Twoich katalogów.
-        // Tu chodzi WYŁĄCZNIE o releaseInfo w kafelkach.
-        id: `tmdb:${item.id}`,
-        type: isMovie ? 'movie' : 'series',
+        id: finalId,
+        type: isMovie ? "movie" : "series",
         name,
         poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
         description: `${descriptionPrefix}${item.overview || "Brak opisu."}`,
 
-        // 🔥 KLUCZ: katalog ma brać Cinemeta jeśli jest, inaczej stary fallback
-        releaseInfo: cineRelease || formatReleaseDate(date)
+        // katalog zostaje “lekki” – tylko rok / DD.MM
+        releaseInfo: formatReleaseDate(date)
       };
     }));
 
