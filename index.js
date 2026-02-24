@@ -375,7 +375,7 @@ async function getMetaFromTMDB(tmdbId, type) {
                         // TERAZ: Dajemy `realId` (czyli tt12345...), jeśli jest dostępne.
                         id: `${realId}:${season.season_number}:${ep.episode_number}`,
                         title: ep.name,
-                        released: new Date(ep.air_date).toISOString(),
+                        released: ep.air_date ? new Date(ep.air_date).toISOString() : null,
                         season: season.season_number,
                         episode: ep.episode_number,
                         overview: ep.overview,
@@ -535,26 +535,29 @@ function translateGenresPL(genres) {
   return genres.map(g => GENRE_PL[g] || g);
 }
 
-// bezpieczny merge: Cinemeta jako baza (runtime/rating), TMDB jako enrich (background/videos)
-function mergeMetaPreferCinemeta(cine, tmdbExtra) {
-  if (!cine) return tmdbExtra;
-  if (!tmdbExtra) return cine;
+function normalizeRuntime(runtime) {
+  if (!runtime) return null;
+  if (typeof runtime === "number") return `${runtime} min`;
+  return runtime; // np. "45 min"
+}
+
+function injectCinemetaHeader(tmdbMeta, cineMeta) {
+  if (!tmdbMeta) return tmdbMeta;
+  if (!cineMeta) return tmdbMeta;
 
   return {
-    ...cine,
-    // tło z TMDB (Cinemeta czasem go nie ma albo ma gorsze)
-    background: cine.background || tmdbExtra.background || null,
+    ...tmdbMeta,
 
-    // opis: wolę opis z TMDB PL jeśli Cinemeta jest EN (Ty masz TMDB PL)
-    description: (tmdbExtra.description && tmdbExtra.description !== "Brak opisu.")
-      ? tmdbExtra.description
-      : cine.description,
+    // 🔥 KLUCZ: to robi "2016–2018" zamiast samego roku
+    releaseInfo: cineMeta.releaseInfo || tmdbMeta.releaseInfo,
 
-    // videos (odcinki) tylko z TMDB
-    videos: tmdbExtra.videos || cine.videos,
+    // runtime + rating (Stremio Android TV to pokazuje w headerze)
+    runtime: normalizeRuntime(cineMeta.runtime) || tmdbMeta.runtime,
+    imdbRating: cineMeta.imdbRating ?? tmdbMeta.imdbRating,
+    ratings: cineMeta.ratings || tmdbMeta.ratings,
 
-    // genres: tłumaczymy (albo możesz tu wstawić TMDB genres PL, patrz niżej)
-    genres: translateGenresPL(cine.genres || tmdbExtra.genres)
+    // gatunki z Cinemeta + mapowanie na PL
+    genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres)
   };
 }
 
@@ -801,45 +804,44 @@ app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 app.get("/meta/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
 
-  // A) TMDB ID -> bierzemy TMDB i (opcjonalnie) domergowujemy Cinemeta po imdb_id
+  // 1) TMDB -> TMDB meta jako baza, a jeśli ma imdb_id to dogrywamy header z Cinemeta
   if (id.startsWith("tmdb:")) {
     const tmdbMeta = await getMetaFromTMDB(id, type);
     if (!tmdbMeta) return res.status(404).send();
 
-    // spróbuj dociągnąć imdb i wziąć z Cinemeta runtime/rating
     const imdbId = tmdbMeta.id?.startsWith("tt") ? tmdbMeta.id : null;
-    if (imdbId) {
-      const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
-      const merged = mergeMetaPreferCinemeta(cine, tmdbMeta);
-      return res.json({ meta: merged });
-    }
+    if (!imdbId) return res.json({ meta: tmdbMeta });
 
-    return res.json({ meta: tmdbMeta });
+    const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
+    const finalMeta = injectCinemetaHeader(tmdbMeta, cine);
+    return res.json({ meta: finalMeta });
   }
 
-  // B) IMDb ID -> Cinemeta jako baza + TMDB jako enrich (tło + odcinki + PL opis)
+  // 2) IMDb -> bierzemy Twoje TMDB meta (żeby opis/tło/odcinki zostały jak były),
+  // a z Cinemeta wstrzykujemy tylko header
   if (id.startsWith("tt")) {
     const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaAuto(id);
 
-    // znajdź TMDB hit (żeby mieć sezony/odcinki i PL opis + tło)
     const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
     const hit = find?.movie_results?.[0] || find?.tv_results?.[0];
 
-    let tmdbExtra = null;
-    if (hit) {
-      tmdbExtra = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
-      if (tmdbExtra) tmdbExtra.id = id; // ważne: utrzymaj id=tt...
+    if (!hit) {
+      // fallback: jak TMDB nie znajdzie, zwróć Cinemeta (lepsze niż 404)
+      if (cine) return res.json({ meta: { ...cine, genres: translateGenresPL(cine.genres) } });
+      return res.status(404).send();
     }
 
-    const merged = mergeMetaPreferCinemeta(cine, tmdbExtra);
-
-    if (merged) {
-      // upewnij się, że id jest tt... (Stremio lubi spójność)
-      merged.id = id;
-      return res.json({ meta: merged });
+    const tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
+    if (!tmdbMeta) {
+      if (cine) return res.json({ meta: { ...cine, genres: translateGenresPL(cine.genres) } });
+      return res.status(404).send();
     }
 
-    return res.status(404).send();
+    tmdbMeta.id = id; // ważne: utrzymaj tt...
+    const finalMeta = injectCinemetaHeader(tmdbMeta, cine);
+    finalMeta.id = id;
+
+    return res.json({ meta: finalMeta });
   }
 
   return res.status(404).send();
