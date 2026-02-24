@@ -347,16 +347,17 @@ async function getMetaFromTMDB(tmdbId, type) {
   const tmdbType = type === "series" ? "tv" : "movie";
   const idNum = String(tmdbId).replace("tmdb:", "");
 
+  // external_ids potrzebne do imdb_id
   const data = await fetchTMDB(`/${tmdbType}/${idNum}`, "append_to_response=external_ids");
   if (!data) return null;
 
   const imdbId = data.external_ids?.imdb_id || null;
 
-  // 🔥 KLUCZ: meta.id ZAWSZE tmdb:...
+  // UWAGA: meta.id = tmdb:... (bez flickera)
   const meta = {
     id: `tmdb:${idNum}`,
     tmdb_id: idNum,
-    imdb_id: imdbId,
+    imdb_id: imdbId, // trzymamy tt... osobno
     type,
     name: data.title || data.name,
     poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
@@ -366,29 +367,30 @@ async function getMetaFromTMDB(tmdbId, type) {
     genres: Array.isArray(data.genres) ? data.genres.map(g => g.name) : []
   };
 
-  // 🔥 SERIAL: odcinki na bazie tmdb:...
+  // Serial: odcinki MUSZĄ mieć bazę tmdb:... (żeby nic nie rozjechało)
   if (type === "series" && Array.isArray(data.seasons)) {
     meta.videos = [];
 
-    const seasons = await Promise.all(
-      data.seasons
-        .filter(s => s && s.season_number > 0)
-        .map(s => fetchTMDB(`/tv/${idNum}/season/${s.season_number}`))
-    );
+    const seasonPromises = data.seasons
+      .filter(s => s && s.season_number > 0)
+      .map(s => fetchTMDB(`/tv/${idNum}/season/${s.season_number}`));
 
-    seasons.forEach(season => {
-      if (!season?.episodes) return;
-      season.episodes.forEach(ep => {
-        meta.videos.push({
-          id: `tmdb:${idNum}:${season.season_number}:${ep.episode_number}`,
-          title: ep.name,
-          released: ep.air_date ? new Date(ep.air_date).toISOString() : null,
-          season: season.season_number,
-          episode: ep.episode_number,
-          overview: ep.overview,
-          thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
+    const seasonsData = await Promise.all(seasonPromises);
+
+    seasonsData.forEach(season => {
+      if (season && Array.isArray(season.episodes)) {
+        season.episodes.forEach(ep => {
+          meta.videos.push({
+            id: `tmdb:${idNum}:${season.season_number}:${ep.episode_number}`,
+            title: ep.name,
+            released: ep.air_date ? new Date(ep.air_date).toISOString() : null,
+            season: season.season_number,
+            episode: ep.episode_number,
+            overview: ep.overview,
+            thumbnail: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
+          });
         });
-      });
+      }
     });
 
     meta.videos.sort((a,b) => (a.season - b.season) || (a.episode - b.episode));
@@ -784,41 +786,59 @@ app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 app.get("/meta/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
 
-  try {
-    // 1) jeśli przyszło tmdb:... -> bazą jest TMDB meta z tmdb id (stabilne)
-    if (id.startsWith("tmdb:")) {
-      const tmdbMeta = await getMetaFromTMDB(id, type);
-      if (!tmdbMeta) return res.status(404).send();
+  // 1) Request TMDB: zawsze baza TMDB, Cinemeta tylko nagłówek
+  if (id.startsWith("tmdb:")) {
+    const tmdbMeta = await getMetaFromTMDB(id, type);
+    if (!tmdbMeta) return res.status(404).send();
 
-      // 2) Cinemeta TYLKO nagłówek (releaseInfo/runtime/rating/genres)
-      const imdbId = tmdbMeta.imdb_id?.startsWith("tt") ? tmdbMeta.imdb_id : null;
-      if (!imdbId) return res.json({ meta: tmdbMeta });
-
+    const imdbId = tmdbMeta.imdb_id;
+    if (imdbId && imdbId.startsWith("tt")) {
       const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
-
-      // 🔥 ważne: NIE zmieniamy id/name/description/poster/background
-      const finalMeta = applyCinemetaHeaderOnly(tmdbMeta, cine);
-      finalMeta.id = tmdbMeta.id; // twardo zabezpiecz
-      finalMeta.name = tmdbMeta.name;
-      finalMeta.description = tmdbMeta.description;
-      finalMeta.poster = tmdbMeta.poster;
-      finalMeta.background = tmdbMeta.background;
-
-      return res.json({ meta: finalMeta });
+      if (cine) {
+        // tylko nagłówek
+        tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
+        tmdbMeta.runtime = cine.runtime || tmdbMeta.runtime;
+        tmdbMeta.imdbRating = cine.imdbRating ?? tmdbMeta.imdbRating;
+        tmdbMeta.ratings = cine.ratings || tmdbMeta.ratings;
+        tmdbMeta.genres = translateGenresPL(cine.genres || tmdbMeta.genres);
+      } else {
+        tmdbMeta.genres = translateGenresPL(tmdbMeta.genres);
+      }
+    } else {
+      tmdbMeta.genres = translateGenresPL(tmdbMeta.genres);
     }
 
-    // IMDb branch może zostać jak był (rzadziej używany), ale też pilnuj spójności
-    if (id.startsWith("tt")) {
-      // tu możesz zostawić swój dotychczasowy fallback
-      const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaAuto(id);
-      if (cine) return res.json({ meta: { ...cine, genres: translateGenresPL(cine.genres) } });
-      return res.status(404).send();
-    }
-
-    return res.status(404).send();
-  } catch {
-    return res.status(404).send();
+    // KLUCZ: meta.id zostaje tmdb:... => brak flickera
+    return res.json({ meta: tmdbMeta });
   }
+
+  // 2) Request IMDb (tt...): mapujemy na TMDB i dalej robimy to samo
+  if (id.startsWith("tt")) {
+    const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
+    const hit = find?.movie_results?.[0] || find?.tv_results?.[0];
+    if (!hit) return res.status(404).send();
+
+    const tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
+    if (!tmdbMeta) return res.status(404).send();
+
+    // tu też nakładamy nagłówek cinemety po tt...
+    const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaAuto(id);
+    if (cine) {
+      tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
+      tmdbMeta.runtime = cine.runtime || tmdbMeta.runtime;
+      tmdbMeta.imdbRating = cine.imdbRating ?? tmdbMeta.imdbRating;
+      tmdbMeta.ratings = cine.ratings || tmdbMeta.ratings;
+      tmdbMeta.genres = translateGenresPL(cine.genres || tmdbMeta.genres);
+    } else {
+      tmdbMeta.genres = translateGenresPL(tmdbMeta.genres);
+    }
+
+    // UWAGA: żeby też nie było flickera — zwracamy tmdb:... (nie tt...)
+    // Jeśli koniecznie chcesz tt... przy request tt..., to wróci flicker.
+    return res.json({ meta: tmdbMeta });
+  }
+
+  return res.status(404).send();
 });
 
 function parseSeasonEpisode(id) { 
