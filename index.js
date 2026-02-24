@@ -366,43 +366,42 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
 ========================= */
 async function getMetaFromTMDB(tmdbId, type) {
   const tmdbType = type === "series" ? "tv" : "movie";
-  const id = tmdbId.replace("tmdb:", "");
+  const idNum = String(tmdbId).replace("tmdb:", "");
 
-  // Kluczowe: external_ids + sezony (dla seriali)
-  const data = await fetchTMDB(`/${tmdbType}/${id}`, "append_to_response=external_ids");
+  const data = await fetchTMDB(`/${tmdbType}/${idNum}`, "append_to_response=external_ids");
   if (!data) return null;
 
-  // Główne ID: IMDb jeśli jest, inaczej TMDB
-  const realId = data.external_ids?.imdb_id || `tmdb:${id}`;
+  const imdbId = data.external_ids?.imdb_id || null;
 
+  // UWAGA: meta.id ZAWSZE = tmdb:... bo request jest tmdb:...
   const meta = {
-    id: realId,
-    tmdb_id: id,
-    type: type,
+    id: `tmdb:${idNum}`,
+    tmdb_id: idNum,
+    imdb_id: imdbId,              // <-- tu trzymamy tt... dla kompatybilności
+    type,
     name: data.title || data.name,
     poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
     background: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
     description: data.overview || "Brak opisu.",
-    // fallback (Cinemeta nadpisze, jeśli realId=tt...)
     releaseInfo: (data.release_date || data.first_air_date || "").substring(0, 4),
-    genres: data.genres ? data.genres.map(g => g.name) : []
+    genres: Array.isArray(data.genres) ? data.genres.map(g => g.name) : []
   };
 
-  // 🚨 SERIAL: odcinki z TMDB (jak było)
-  if (type === "series" && data.seasons) {
+  // SERIAL: odcinki MUSZĄ mieć bazę tmdb:... żeby Stremio tego nie rozjechało
+  if (type === "series" && Array.isArray(data.seasons)) {
     meta.videos = [];
 
     const seasonPromises = data.seasons
-      .filter(s => s.season_number > 0)
-      .map(s => fetchTMDB(`/tv/${id}/season/${s.season_number}`));
+      .filter(s => s && s.season_number > 0)
+      .map(s => fetchTMDB(`/tv/${idNum}/season/${s.season_number}`));
 
     const seasonsData = await Promise.all(seasonPromises);
 
     seasonsData.forEach(season => {
-      if (season && season.episodes) {
+      if (season && Array.isArray(season.episodes)) {
         season.episodes.forEach(ep => {
           meta.videos.push({
-            id: `${realId}:${season.season_number}:${ep.episode_number}`,
+            id: `tmdb:${idNum}:${season.season_number}:${ep.episode_number}`, // <-- baza tmdb
             title: ep.name,
             released: ep.air_date ? new Date(ep.air_date).toISOString() : null,
             season: season.season_number,
@@ -414,30 +413,22 @@ async function getMetaFromTMDB(tmdbId, type) {
       }
     });
 
-    meta.videos.sort((a, b) => (a.season - b.season) || (a.episode - b.episode));
+    meta.videos.sort((a,b) => (a.season - b.season) || (a.episode - b.episode));
   }
 
-  // ✅ HEADER z CINEMETA (tylko jeśli mamy tt...)
-  // Nadpisujemy WYŁĄCZNIE: releaseInfo/runtime/imdbRating/ratings/genres(PL)
-  if (typeof realId === "string" && realId.startsWith("tt")) {
-    const cine = await fetchCinemetaFull(type, realId) || await fetchCinemetaAuto(realId);
-
+  // Header z Cinemeta – ale NIE dotykamy meta.id
+  if (imdbId && imdbId.startsWith("tt")) {
+    const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
     if (cine) {
       meta.releaseInfo = cine.releaseInfo || meta.releaseInfo;
-      meta.runtime = cine.runtime || meta.runtime;               // np. "45 min"
-      meta.imdbRating = cine.imdbRating ?? meta.imdbRating;     // np. 6.8
+      meta.runtime = cine.runtime || meta.runtime;
+      meta.imdbRating = cine.imdbRating ?? meta.imdbRating;
       meta.ratings = cine.ratings || meta.ratings;
       meta.genres = translateGenresPL(cine.genres || meta.genres);
-
-      // (opcjonalnie) jeżeli TMDB nie ma plakatu, a Cinemeta ma:
-      meta.poster = meta.poster || cine.poster || null;
-      // (opcjonalnie) jeśli Cinemeta ma lepszy opis PL/EN — ale TY chcesz zostawić TMDB PL, więc nie ruszam.
     } else {
-      // jak Cinemeta nie dojdzie, to chociaż tłumaczymy gatunki
       meta.genres = translateGenresPL(meta.genres);
     }
   } else {
-    // brak imdb -> tłumaczymy gatunki z TMDB (jeśli są po EN)
     meta.genres = translateGenresPL(meta.genres);
   }
 
@@ -898,7 +889,7 @@ app.get("/meta/:type/:id.json", async (req, res) => {
     const tmdbMeta = await getMetaFromTMDB(id, type);
     if (!tmdbMeta) return res.status(404).send();
 
-    const imdbId = tmdbMeta.id?.startsWith("tt") ? tmdbMeta.id : null;
+    const imdbId = tmdbMeta.imdb_id?.startsWith("tt") ? tmdbMeta.imdb_id : null;
     if (!imdbId) return res.json({ meta: tmdbMeta });
 
     const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
