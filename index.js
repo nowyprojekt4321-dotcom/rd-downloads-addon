@@ -831,17 +831,29 @@ app.get("/meta/:type/:id.json", async (req, res) => {
       return res.json({ meta: tmdbMeta });
     }
 
-    // 2) request tt... -> mapujemy na TMDB, ale zwracamy meta.id = tt... (stabilnie)
+    // 2) request tt... -> mapujemy na TMDB, ale ZWRACAMY STABILNE meta.id = tmdb:... (zero flickera)
+    // tt... id zostaje tylko w polu imdb_id
     if (id.startsWith("tt")) {
       const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
-      const hit = (type === "movie" ? find?.movie_results?.[0] : find?.tv_results?.[0]) || find?.movie_results?.[0] || find?.tv_results?.[0];
+      const hit =
+        (type === "movie" ? find?.movie_results?.[0] : find?.tv_results?.[0]) ||
+        find?.movie_results?.[0] ||
+        find?.tv_results?.[0];
+
       if (!hit?.id) return res.status(404).send();
 
-      const tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type, id);
+      const stableTmdbId = `tmdb:${hit.id}`;
+      const tmdbMeta = await getMetaFromTMDB(stableTmdbId, type, stableTmdbId);
       if (!tmdbMeta) return res.status(404).send();
 
-      // Cinemeta nagłówek (2016–2018 itd.), ID zostaje tt...
-      const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaFull(type === "movie" ? "series" : "movie", id);
+      // 🔥 zachowaj informacyjnie imdb_id = tt...
+      tmdbMeta.imdb_id = id;
+
+      // Cinemeta nagłówek
+      const cine =
+        (await fetchCinemetaFull(type, id)) ||
+        (await fetchCinemetaFull(type === "movie" ? "series" : "movie", id));
+
       if (cine) tmdbMeta.releaseInfo = cine.releaseInfo || tmdbMeta.releaseInfo;
 
       return res.json({ meta: tmdbMeta });
