@@ -535,19 +535,26 @@ function translateGenresPL(genres) {
   return genres.map(g => GENRE_PL[g] || g);
 }
 
-function injectCinemetaHeader(tmdbMeta, cineMeta) {
-  if (!tmdbMeta || !cineMeta) return tmdbMeta;
+// bezpieczny merge: Cinemeta jako baza (runtime/rating), TMDB jako enrich (background/videos)
+function mergeMetaPreferCinemeta(cine, tmdbExtra) {
+  if (!cine) return tmdbExtra;
+  if (!tmdbExtra) return cine;
 
   return {
-    ...tmdbMeta,
+    ...cine,
+    // tło z TMDB (Cinemeta czasem go nie ma albo ma gorsze)
+    background: cine.background || tmdbExtra.background || null,
 
-    // ⬇️ TYLKO TO, CO WIDZI UI W HEADERZE
-    runtime: cineMeta.runtime || tmdbMeta.runtime,
-    ratings: cineMeta.ratings || tmdbMeta.ratings,
-    imdbRating: cineMeta.imdbRating || tmdbMeta.imdbRating,
+    // opis: wolę opis z TMDB PL jeśli Cinemeta jest EN (Ty masz TMDB PL)
+    description: (tmdbExtra.description && tmdbExtra.description !== "Brak opisu.")
+      ? tmdbExtra.description
+      : cine.description,
 
-    // gatunki – bierzemy z Cinemeta, ale tłumaczymy
-    genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres)
+    // videos (odcinki) tylko z TMDB
+    videos: tmdbExtra.videos || cine.videos,
+
+    // genres: tłumaczymy (albo możesz tu wstawić TMDB genres PL, patrz niżej)
+    genres: translateGenresPL(cine.genres || tmdbExtra.genres)
   };
 }
 
@@ -799,31 +806,41 @@ app.get("/meta/:type/:id.json", async (req, res) => {
     const tmdbMeta = await getMetaFromTMDB(id, type);
     if (!tmdbMeta) return res.status(404).send();
 
+    // spróbuj dociągnąć imdb i wziąć z Cinemeta runtime/rating
     const imdbId = tmdbMeta.id?.startsWith("tt") ? tmdbMeta.id : null;
-    if (!imdbId) return res.json({ meta: tmdbMeta });
-
-    const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
-    const finalMeta = injectCinemetaHeader(tmdbMeta, cine);
-
-    return res.json({ meta: finalMeta });
+    if (imdbId) {
+      const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
+      const merged = mergeMetaPreferCinemeta(cine, tmdbMeta);
+      return res.json({ meta: merged });
     }
+
+    return res.json({ meta: tmdbMeta });
+  }
 
   // B) IMDb ID -> Cinemeta jako baza + TMDB jako enrich (tło + odcinki + PL opis)
   if (id.startsWith("tt")) {
     const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaAuto(id);
 
+    // znajdź TMDB hit (żeby mieć sezony/odcinki i PL opis + tło)
     const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
     const hit = find?.movie_results?.[0] || find?.tv_results?.[0];
 
-    let tmdbMeta = null;
+    let tmdbExtra = null;
     if (hit) {
-        tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
-        if (tmdbMeta) tmdbMeta.id = id;
+      tmdbExtra = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
+      if (tmdbExtra) tmdbExtra.id = id; // ważne: utrzymaj id=tt...
     }
 
-    const finalMeta = injectCinemetaHeader(tmdbMeta, cine);
-    return res.json({ meta: finalMeta });
+    const merged = mergeMetaPreferCinemeta(cine, tmdbExtra);
+
+    if (merged) {
+      // upewnij się, że id jest tt... (Stremio lubi spójność)
+      merged.id = id;
+      return res.json({ meta: merged });
     }
+
+    return res.status(404).send();
+  }
 
   return res.status(404).send();
 });
