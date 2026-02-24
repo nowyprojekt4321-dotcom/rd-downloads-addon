@@ -486,71 +486,6 @@ async function fetchCinemeta(idOrName) {
   return null;
 }
 
-async function fetchCinemetaFull(type, imdbId) {
-  if (!imdbId?.startsWith("tt")) return null;
-  const base = "https://v3-cinemeta.strem.io";
-  try {
-    const r = await fetch(`${base}/meta/${type}/${imdbId}.json`);
-    if (!r.ok) return null;
-    const j = await r.json();
-    return j?.meta || null;
-  } catch {
-    return null;
-  }
-}
-
-// fallback: jak nie jesteś pewien type (czasem Stremio poda series, a to film itd.)
-async function fetchCinemetaAuto(imdbId) {
-  let m = await fetchCinemetaFull("series", imdbId);
-  if (m) return m;
-  m = await fetchCinemetaFull("movie", imdbId);
-  if (m) return m;
-  return null;
-}
-
-const GENRE_PL = {
-  "Drama": "Dramat",
-  "Fantasy": "Fantasy",
-  "Mystery": "Tajemnica",
-  "Science Fiction": "Sci-fi",
-  "Sci-Fi": "Sci-fi",
-  "Adventure": "Przygodowy",
-  "Action": "Akcja",
-  "Comedy": "Komedia",
-  "Horror": "Horror",
-  "Thriller": "Thriller",
-  "Crime": "Kryminał",
-  "Romance": "Romans",
-  "Family": "Rodzinny",
-  "Animation": "Animacja",
-  "War": "Wojenny",
-  "History": "Historyczny",
-  "Music": "Muzyczny",
-  "Documentary": "Dokumentalny",
-  "Western": "Western"
-};
-
-function translateGenresPL(genres) {
-  if (!Array.isArray(genres)) return genres;
-  return genres.map(g => GENRE_PL[g] || g);
-}
-
-function injectCinemetaHeader(tmdbMeta, cineMeta) {
-  if (!tmdbMeta || !cineMeta) return tmdbMeta;
-
-  return {
-    ...tmdbMeta,
-
-    // ⬇️ TYLKO TO, CO WIDZI UI W HEADERZE
-    runtime: cineMeta.runtime || tmdbMeta.runtime,
-    ratings: cineMeta.ratings || tmdbMeta.ratings,
-    imdbRating: cineMeta.imdbRating || tmdbMeta.imdbRating,
-
-    // gatunki – bierzemy z Cinemeta, ale tłumaczymy
-    genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres)
-  };
-}
-
 /* =========================
    MANAGER UI (HYBRID)
 ========================= */
@@ -792,40 +727,19 @@ app.get("/catalog/:type/:id.json", handleCatalog);
 app.get("/catalog/:type/:id/:extra.json", handleCatalog);
 
 app.get("/meta/:type/:id.json", async (req, res) => {
-  const { type, id } = req.params;
-
-  // A) TMDB ID -> bierzemy TMDB i (opcjonalnie) domergowujemy Cinemeta po imdb_id
-  if (id.startsWith("tmdb:")) {
-    const tmdbMeta = await getMetaFromTMDB(id, type);
-    if (!tmdbMeta) return res.status(404).send();
-
-    const imdbId = tmdbMeta.id?.startsWith("tt") ? tmdbMeta.id : null;
-    if (!imdbId) return res.json({ meta: tmdbMeta });
-
-    const cine = await fetchCinemetaFull(type, imdbId) || await fetchCinemetaAuto(imdbId);
-    const finalMeta = injectCinemetaHeader(tmdbMeta, cine);
-
-    return res.json({ meta: finalMeta });
+    const { type, id } = req.params;
+    if (id.startsWith("tmdb:")) return res.json({ meta: await getMetaFromTMDB(id, type) });
+    
+    // Obsługa IMDb ID (konwersja na TMDB dla pełnych danych o odcinkach)
+    if (id.startsWith("tt")) {
+        const data = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
+        const hit = data?.movie_results?.[0] || data?.tv_results?.[0];
+        if (hit) {
+            const details = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
+            if (details) { details.id = id; return res.json({ meta: details }); }
+        }
     }
-
-  // B) IMDb ID -> Cinemeta jako baza + TMDB jako enrich (tło + odcinki + PL opis)
-  if (id.startsWith("tt")) {
-    const cine = await fetchCinemetaFull(type, id) || await fetchCinemetaAuto(id);
-
-    const find = await fetchTMDB(`/find/${id}`, "external_source=imdb_id");
-    const hit = find?.movie_results?.[0] || find?.tv_results?.[0];
-
-    let tmdbMeta = null;
-    if (hit) {
-        tmdbMeta = await getMetaFromTMDB(`tmdb:${hit.id}`, type);
-        if (tmdbMeta) tmdbMeta.id = id;
-    }
-
-    const finalMeta = injectCinemetaHeader(tmdbMeta, cine);
-    return res.json({ meta: finalMeta });
-    }
-
-  return res.status(404).send();
+    res.status(404).send();
 });
 
 function parseSeasonEpisode(id) { 
