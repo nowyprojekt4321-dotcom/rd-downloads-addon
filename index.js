@@ -46,6 +46,10 @@ let ALL_TORRENTS_CACHE = [];
 let METADATA_CACHE = {}; 
 let HIDDEN_GROUPS = new Set();
 let isUpdating = false;
+let CINEMETA_HEADER_CACHE = new Map(); // key: tt..., value: { releaseInfo, ts }
+const CINEMETA_HEADER_TTL = 7 * 24 * 60 * 60 * 1000; // 7 dni
+let TMDB_IMDB_CACHE = new Map(); // key: "movie:123" / "tv:456" -> { imdbId, ts }
+const TMDB_IMDB_TTL = 30 * 24 * 60 * 60 * 1000; // 30 dni
 
 /* =========================
    TMDB CONFIG & HELPERS
@@ -152,6 +156,20 @@ function formatReleaseDate(dateStr) {
     }
     // Jeśli przeszłość -> Rok (2024)
     return dateStr.substring(0, 4);
+}
+
+async function getImdbIdFromTMDB(tmdbType, tmdbNumericId) {
+  if (!TMDB_KEY) return null;
+
+  const key = `${tmdbType}:${tmdbNumericId}`;
+  const cached = TMDB_IMDB_CACHE.get(key);
+  if (cached && Date.now() - cached.ts < TMDB_IMDB_TTL) return cached.imdbId;
+
+  const ext = await fetchTMDB(`/${tmdbType}/${tmdbNumericId}/external_ids`);
+  const imdbId = ext?.imdb_id || null;
+
+  TMDB_IMDB_CACHE.set(key, { imdbId, ts: Date.now() });
+  return imdbId;
 }
 
 /* =========================
@@ -302,32 +320,45 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
     });
 
     // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) ---
-    return results.map(item => {
-        const isMovie = item.media_type === 'movie';
-        const date = item.release_date || item.first_air_date;
-        let name = item.title || item.name;
-        let descriptionPrefix = ""; 
+    const metas = await Promise.all(results.map(async (item) => {
+      const isMovie = item.media_type === 'movie';
+      const date = item.release_date || item.first_air_date;
+      let name = item.title || item.name;
+      let descriptionPrefix = "";
 
-        if (catalogId === "this_month" || catalogId.endsWith("_new") || catalogId.endsWith("_movies") || catalogId.endsWith("_series")) {
-            const releaseDate = new Date(date);
-            const nowTime = new Date(); 
-            if (releaseDate > nowTime) {
-                name = `${name}`;
-                descriptionPrefix = "";
-            } else {
-                descriptionPrefix = isMovie ? "" : "";
-            }
+      if (catalogId === "this_month" || catalogId.endsWith("_new") || catalogId.endsWith("_movies") || catalogId.endsWith("_series")) {
+        const releaseDate = new Date(date);
+        const nowTime = new Date();
+        if (releaseDate > nowTime) {
+          name = `${name}`;
+          descriptionPrefix = "";
+        } else {
+          descriptionPrefix = isMovie ? "" : "";
         }
+      }
 
-        return {
-            id: `tmdb:${item.id}`,
-            type: isMovie ? 'movie' : 'series',
-            name: name, 
-            poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-            description: `${descriptionPrefix}${item.overview || "Brak opisu."}`,
-            releaseInfo: formatReleaseDate(date)
-        };
-    }).filter(i => i.poster);
+      // 1) TMDB -> IMDb (tt...) żeby dało się pobrać Cinemeta releaseInfo
+      const tmdbType = isMovie ? "movie" : "tv";
+      const imdbId = await getImdbIdFromTMDB(tmdbType, item.id);
+
+      // 2) Cinemeta releaseInfo (np. "2016–2018") z cache
+      const cineRelease = imdbId ? await fetchCinemetaReleaseInfo(imdbId) : null;
+
+      return {
+        // UWAGA: zostawiamy ID jako tmdb:... żeby nie zmieniać zachowania Twoich katalogów.
+        // Tu chodzi WYŁĄCZNIE o releaseInfo w kafelkach.
+        id: `tmdb:${item.id}`,
+        type: isMovie ? 'movie' : 'series',
+        name,
+        poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+        description: `${descriptionPrefix}${item.overview || "Brak opisu."}`,
+
+        // 🔥 KLUCZ: katalog ma brać Cinemeta jeśli jest, inaczej stary fallback
+        releaseInfo: cineRelease || formatReleaseDate(date)
+      };
+    }));
+
+    return metas.filter(i => i.poster);
 }
 
 /* =========================
@@ -606,6 +637,19 @@ function applyCinemetaHeaderOnly(tmdbMeta, cineMeta) {
   };
 }
 
+async function fetchCinemetaReleaseInfo(imdbId) {
+  if (!imdbId?.startsWith("tt")) return null;
+
+  const cached = CINEMETA_HEADER_CACHE.get(imdbId);
+  if (cached && Date.now() - cached.ts < CINEMETA_HEADER_TTL) return cached.releaseInfo;
+
+  const m = await fetchCinemetaFull("series", imdbId) || await fetchCinemetaFull("movie", imdbId);
+  const rel = m?.releaseInfo || null;
+
+  CINEMETA_HEADER_CACHE.set(imdbId, { releaseInfo: rel, ts: Date.now() });
+  return rel;
+}
+
 /* =========================
    MANAGER UI (HYBRID)
 ========================= */
@@ -768,8 +812,8 @@ app.get("/manifest.json", (req, res) => {
     const genreFilters = Object.keys(GENRES).map(g => g.charAt(0).toUpperCase() + g.slice(1));
     
     res.json({
-        id: "community.rd.manager.v15.1",
-        version: "15.0.1",
+        id: "community.rd.manager.v15.2",
+        version: "15.0.2",
         name: "RDD ULTIMATE PL",
         description: "Manager + Premium VOD + Kino",
         logo: "https://rd-downloads-addon.onrender.com/assets/logo.png",
