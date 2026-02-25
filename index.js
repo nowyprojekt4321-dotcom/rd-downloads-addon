@@ -155,6 +155,58 @@ function formatReleaseDate(dateStr) {
 }
 
 /* =========================
+   CARD META CACHE (dla nagłówka kafelków w /catalog)
+   - Stremio często buduje nagłówek hover z danych katalogu
+   - dociągamy runtime/genres/rating tylko dla aktualnej strony (20 szt.)
+========================= */
+const CARD_META_CACHE = new Map();
+const CARD_META_TTL = 24 * 60 * 60 * 1000; // 24h
+
+async function getCardMetaExtras(tmdbId, type) {
+  const key = `${type}:${tmdbId}`;
+  const now = Date.now();
+
+  const cached = CARD_META_CACHE.get(key);
+  if (cached && now - cached.timestamp < CARD_META_TTL) return cached.data;
+
+  const tmdbType = type === "series" ? "tv" : "movie";
+  const details = await fetchTMDB(`/${tmdbType}/${tmdbId}`); // pl-PL już jest w fetchTMDB
+
+  if (!details || !details.id) {
+    const fallback = { runtime: null, genres: [], imdbRating: null };
+    CARD_META_CACHE.set(key, { data: fallback, timestamp: now });
+    return fallback;
+  }
+
+  // runtime: movie.runtime / tv.episode_run_time[0] -> ZAWSZE "X min"
+  let runtime = null;
+  if (type === "movie" && typeof details.runtime === "number" && details.runtime > 0) {
+    runtime = `${details.runtime} min`;
+  } else if (
+    type === "series" &&
+    Array.isArray(details.episode_run_time) &&
+    typeof details.episode_run_time[0] === "number" &&
+    details.episode_run_time[0] > 0
+  ) {
+    runtime = `${details.episode_run_time[0]} min`;
+  }
+
+  const genres = Array.isArray(details.genres)
+    ? details.genres.map((g) => g?.name).filter(Boolean)
+    : [];
+
+  // rating z TMDB (ale wkładamy w imdbRating żeby UI było jak w Cinemeta)
+  const imdbRating =
+    typeof details.vote_average === "number" && details.vote_average > 0
+      ? Math.round(details.vote_average * 10) / 10
+      : null;
+
+  const data = { runtime, genres, imdbRating };
+  CARD_META_CACHE.set(key, { data, timestamp: now });
+  return data;
+}
+
+/* =========================
    CATALOG LOGIC (v16.2 FINAL ENGINE: FILTERS + ANIMATION + GENRE FIX)
 ========================= */
 async function getCatalog(catalogId, type, genre, skip = 0) {
@@ -174,7 +226,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         if (KEYWORDS[genre]) {
             extraFilters += `&with_keywords=${KEYWORDS[genre]}`;
         }
-        
         // B. STANDARDOWE GATUNKI (Dodałem "Rodzinne" dla Animacji)
         else if (["Akcja", "Komedia", "Horror", "Sci-fi", "Dramat", "Animowany", "Dokumentalny", "Fanstasy", "Przygodowy", "Rodzinne"].includes(genre)) {
              const genreMap = { 
@@ -184,32 +235,26 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
             };
             if (genreMap[genre]) extraFilters += `&with_genres=${genreMap[genre]}`;
         }
-
         // C. OCENY
         else if (genre === "Hity (8.0+)") extraFilters += `&vote_average.gte=8.0&vote_count.gte=200`;
         else if (genre === "Dobre (7.0+)") extraFilters += `&vote_average.gte=7.0&vote_count.gte=100`;
         else if (genre === "Reszta (4.5+)") extraFilters += `&vote_average.gte=4.5`;
-
         // D. LATA (MATEMATYKA DAT - BAZA 2026)
         else if (genre === "Ten rok") {
-            // 2026
             extraFilters += `&primary_release_year=${currentYear}`;
             extraFilters += `&first_air_date_year=${currentYear}`;
         }
         else if (genre === "Zeszły rok") {
-            // 2025
             extraFilters += `&primary_release_year=${currentYear - 1}`;
             extraFilters += `&first_air_date_year=${currentYear - 1}`;
         }
         else if (genre === "5 lat wstecz") {
-            // 2020 - 2024
             const start = currentYear - 6; // 2020
             const end = currentYear - 2;   // 2024
             extraFilters += `&primary_release_date.gte=${start}-01-01&primary_release_date.lte=${end}-12-31`;
             extraFilters += `&first_air_date.gte=${start}-01-01&first_air_date.lte=${end}-12-31`;
         }
         else if (genre === "10 lat wstecz") {
-            // 2015 - 2019
             const start = currentYear - 11; // 2015
             const end = currentYear - 7;    // 2019
             extraFilters += `&primary_release_date.gte=${start}-01-01&primary_release_date.lte=${end}-12-31`;
@@ -219,7 +264,6 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
 
     // --- 1. SEKCJA PREMIERY (MIX) ---
     if (catalogId === "this_month") {
-        // Jeśli brak filtra, domyślnie pokazujemy też przyszłość (+3 miesiące)
         if (!genre) {
             const futureDate = new Date(now.getFullYear(), now.getMonth() + 3, 1).toISOString().split('T')[0];
             extraFilters += `&primary_release_date.lte=${futureDate}`; 
@@ -263,18 +307,9 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
     // --- 3. GATUNKI GLOBALNE (Z DEDYKOWANYMI FILTRAMI) ---
     else if (catalogId.startsWith("genre_")) {
         const genreKey = catalogId.replace("genre_", "");
-        const baseGenreId = GENRES[genreKey]; // np. 27 dla Horror
-
-        // TU BYŁ PROBLEM: 
-        // Jeśli użytkownik wybrał filtr "Zombie" (Słowo kluczowe), extraFilters ma tylko &with_keywords=...
-        // Ale my jesteśmy w katalogu HORRORY, więc musimy dodać &with_genres=27.
-        // Jeśli użytkownik wybrał filtr "Rodzinne" (Gatunek), extraFilters ma &with_genres=10751.
-        // Wtedy nie dodajemy na siłę gatunku bazowego, bo użytkownik wybrał konkret.
+        const baseGenreId = GENRES[genreKey];
 
         let finalParams = `${sortParam}${extraFilters}&page=${page}${regionParams}`;
-        
-        // Jeśli w filtrach NIE MA nadpisania gatunku (czyli wybrano np. rok, ocenę albo słowo kluczowe like Zombie),
-        // to dodajemy bazowy gatunek katalogu (np. Horror).
         if (!finalParams.includes("with_genres=")) {
             finalParams += `&with_genres=${baseGenreId}`;
         }
@@ -301,8 +336,8 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
         return dateB - dateA; 
     });
 
-    // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) ---
-    return results.map(item => {
+    // --- MAPOWANIE WYNIKÓW (CLEAN UI v15.8) + NAGŁÓWEK HOVER ---
+    const mapped = await Promise.all(results.map(async (item) => {
         const isMovie = item.media_type === 'movie';
         const date = item.release_date || item.first_air_date;
         let name = item.title || item.name;
@@ -319,15 +354,24 @@ async function getCatalog(catalogId, type, genre, skip = 0) {
             }
         }
 
+        // >>> DODATEK: runtime/imdbRating/genres do hover header
+        const extras = await getCardMetaExtras(item.id, isMovie ? "movie" : "series");
+
         return {
             id: `tmdb:${item.id}`,
             type: isMovie ? 'movie' : 'series',
             name: name, 
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
             description: `${descriptionPrefix}${item.overview || "Brak opisu."}`,
-            releaseInfo: formatReleaseDate(date)
+            releaseInfo: formatReleaseDate(date),
+
+            runtime: extras.runtime,
+            imdbRating: extras.imdbRating,
+            genres: extras.genres
         };
-    }).filter(i => i.poster);
+    }));
+
+    return mapped.filter(i => i.poster);
 }
 
 /* =========================
@@ -507,6 +551,49 @@ function applyCinemetaHeaderOnly(tmdbMeta, cineMeta) {
     ratings,
     genres: translateGenresPL(cineMeta.genres || tmdbMeta.genres)
   };
+}
+
+/* =========================
+   CINEMETA HEADER CACHE (dla MOJE FILMY / MOJE SERIALE)
+   - te katalogi nie mają danych z TMDB listy
+   - bierzemy header z Cinemeta: runtime/releaseInfo/imdbRating/genres
+========================= */
+const CINEMETA_HEADER_CACHE = new Map();
+const CINEMETA_HEADER_TTL = 24 * 60 * 60 * 1000; // 24h
+
+async function getCinemetaHeader(imdbId, type) {
+  const key = `${type}:${imdbId}`;
+  const now = Date.now();
+
+  const cached = CINEMETA_HEADER_CACHE.get(key);
+  if (cached && now - cached.timestamp < CINEMETA_HEADER_TTL) return cached.data;
+
+  const metaBase = "https://v3-cinemeta.strem.io";
+  try {
+    const r = await fetch(`${metaBase}/meta/${type}/${imdbId}.json`);
+    if (!r.ok) throw new Error(`Cinemeta ${r.status}`);
+    const j = await r.json();
+    const m = j?.meta;
+    if (!m) throw new Error("No meta");
+
+    // runtime: zostawiamy jak Cinemeta (zwykle "45 min"); jak number -> dopnij " min"
+    let runtime = m.runtime ?? null;
+    if (typeof runtime === "number") runtime = `${runtime} min`;
+
+    const data = {
+      runtime,
+      releaseInfo: m.releaseInfo ?? null,
+      imdbRating: m.imdbRating ?? null,
+      genres: Array.isArray(m.genres) ? m.genres : []
+    };
+
+    CINEMETA_HEADER_CACHE.set(key, { data, timestamp: now });
+    return data;
+  } catch (e) {
+    const fallback = { runtime: null, releaseInfo: null, imdbRating: null, genres: [] };
+    CINEMETA_HEADER_CACHE.set(key, { data: fallback, timestamp: now });
+    return fallback;
+  }
 }
 
 /* =========================
@@ -709,41 +796,59 @@ app.get("/manifest.json", (req, res) => {
 });
 
 async function handleCatalog(req, res) {
-    const { type, id, extra } = req.params;
-    let skip = 0;
-    let genre = null;
-    
-    // Parsowanie extra params (skip i genre)
-    if (extra) {
-        const skipMatch = extra.match(/skip=(\d+)/);
-        if (skipMatch) skip = parseInt(skipMatch[1]);
-        const genreMatch = extra.match(/genre=([^&]+)/);
-        if (genreMatch) genre = genreMatch[1];
-    }
+  const { type, id, extra } = req.params;
+  let skip = 0;
+  let genre = null;
 
-    // OBSŁUGA "MOJE PLIKI" (Lokalny Cache)
-    if (id === "rd_series" || id === "rd_movies") {
-        const metas = [];
-        const files = hostersOnly(ALL_DOWNLOADS_CACHE); 
-        const unique = new Set();
-        
-        const processItem = (item) => {
-            const key = getNormalizedKey(item.filename);
-            if (HIDDEN_GROUPS.has(key)) return;
-            const meta = METADATA_CACHE[item.id];
-            if (!meta || !meta.id.startsWith("tt") || meta.type !== type) return;
-            if (!unique.has(meta.id)) { unique.add(meta.id); metas.push({ id: meta.id, type: meta.type, name: meta.name, poster: meta.poster }); }
+  // Parsowanie extra params (skip i genre)
+  if (extra) {
+    const skipMatch = extra.match(/skip=(\d+)/);
+    if (skipMatch) skip = parseInt(skipMatch[1]);
+    const genreMatch = extra.match(/genre=([^&]+)/);
+    if (genreMatch) genre = genreMatch[1];
+  }
+
+  // ✅ OBSŁUGA "MOJE PLIKI" (Lokalny Cache) + HEADER
+  if (id === "rd_series" || id === "rd_movies") {
+    const files = hostersOnly(ALL_DOWNLOADS_CACHE);
+    const unique = new Map(); // imdbId -> base meta (z METADATA_CACHE)
+
+    const collect = (item) => {
+      const key = getNormalizedKey(item.filename);
+      if (HIDDEN_GROUPS.has(key)) return;
+
+      const meta = METADATA_CACHE[item.id];
+      if (!meta || !meta.id?.startsWith("tt") || meta.type !== type) return;
+
+      if (!unique.has(meta.id)) {
+        unique.set(meta.id, { id: meta.id, type: meta.type, name: meta.name, poster: meta.poster });
+      }
+    };
+
+    files.forEach(collect);
+    ALL_TORRENTS_CACHE.filter((t) => t.status === "downloaded").forEach(collect);
+
+    // dociągnij header z Cinemeta (z cache) dla unikalnych pozycji
+    const metas = await Promise.all(
+      [...unique.values()].map(async (m) => {
+        const header = await getCinemetaHeader(m.id, m.type);
+
+        return {
+          ...m,
+          releaseInfo: header.releaseInfo || undefined,
+          runtime: header.runtime || undefined,
+          imdbRating: header.imdbRating ?? undefined,
+          genres: header.genres || undefined
         };
+      })
+    );
 
-        files.forEach(processItem);
-        ALL_TORRENTS_CACHE.filter(t => t.status === 'downloaded').forEach(processItem);
-        
-        return res.json({ metas: metas.slice(0, 100) });
-    }
+    return res.json({ metas: metas.slice(0, 100) });
+  }
 
-    // OBSŁUGA KATALOGÓW TMDB (v15 Engine)
-    const items = await getCatalog(id, type, genre, skip);
-    res.json({ metas: items });
+  // OBSŁUGA KATALOGÓW TMDB (v15 Engine)
+  const items = await getCatalog(id, type, genre, skip);
+  res.json({ metas: items });
 }
 
 app.get("/catalog/:type/:id.json", handleCatalog);
