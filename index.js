@@ -491,7 +491,7 @@ function dashboardHostersOnly(downloads) {
   );
 }
 
-function matchesEpisode(filename, season, episode) {F
+function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
   const s = Number(season), e = Number(episode);
 
