@@ -924,7 +924,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
   const { baseId, season, episode } = parseSeasonEpisode(id);
   const streams = [];
 
-  // 1) DOWNLOADS — zawsze przez RD unrestrict (stabilne w playerach)
+  // 1) DOWNLOADS — unrestrictujemy po ORYGINALNYM linku (f.link), a nie po f.download
     for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
     if (!meta) continue;
@@ -939,8 +939,28 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         if (!matchesEpisode(f.filename, season, episode)) continue;
     }
 
-    // KLUCZ: unrestrictujemy link do odtwarzania
-    const direct = await rdUnrestrict(f.download);
+    // RD unrestrict najlepiej działa na f.link (oryginalny hoster / google drive / itd.)
+    // f.download to często już CDN RD i API może to odrzucać.
+    const candidate = (typeof f.link === "string" && f.link.startsWith("http"))
+        ? f.link
+        : f.download;
+
+    let direct = null;
+
+    if (candidate) {
+        direct = await rdUnrestrict(candidate);
+    }
+
+    // Fallback: gdyby RD jednak nie przyjął f.link, spróbuj f.download
+    if (!direct && candidate !== f.download && typeof f.download === "string") {
+        direct = await rdUnrestrict(f.download);
+    }
+
+    // Ostateczny fallback: jeśli nadal brak, spróbuj puścić surowy download (czasem działa)
+    if (!direct && typeof f.download === "string") {
+        direct = f.download;
+    }
+
     if (direct) {
         streams.push({ name, title, url: direct });
     }
