@@ -450,19 +450,8 @@ function getDisplayTitle(filename) {
   const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
   return match && match[1] ? match[1].trim() : clean;
 }
-function hostersOnly(downloads) {
-  // To jest lista dla Stremio: tylko pozycje, które da się oglądać i mają direct URL
-  return (downloads || []).filter(d =>
-    d && d.streamable === 1 && typeof d.download === "string" && d.download.startsWith("http")
-  );
-}
-
-function dashboardHostersOnly(downloads) {
-  // Dashboard: trzymajmy spójność z tym, co trafia do Stremio
-  return (downloads || []).filter(d =>
-    d && d.streamable === 1 && typeof d.download === "string" && d.download.startsWith("http")
-  );
-}
+function hostersOnly(downloads) { return downloads.filter(d => d.streamable === 1 && !d.link.includes("/d/")); }
+function dashboardHostersOnly(downloads) { return downloads.filter(d => !d.link.includes("/d/")); }
 function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
   const s = Number(season), e = Number(episode);
