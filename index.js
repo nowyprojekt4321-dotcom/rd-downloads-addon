@@ -491,7 +491,7 @@ function dashboardHostersOnly(downloads) {
   );
 }
 
-function matchesEpisode(filename, season, episode) {
+function matchesEpisode(filename, season, episode) {F
   if (!season || !episode) return false;
   const s = Number(season), e = Number(episode);
 
@@ -924,8 +924,8 @@ app.get("/stream/:type/:id.json", async (req, res) => {
   const { baseId, season, episode } = parseSeasonEpisode(id);
   const streams = [];
 
-  // 1) DOWNLOADS — ZAWSZE f.download (działa)
-  for (const f of ALL_DOWNLOADS_CACHE) {
+  // 1) DOWNLOADS — zawsze przez RD unrestrict (stabilne w playerach)
+    for (const f of ALL_DOWNLOADS_CACHE) {
     const meta = METADATA_CACHE[f.id];
     if (!meta) continue;
 
@@ -936,13 +936,15 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     const name = "💎 MOJE RD";
 
     if (type === "series") {
-      if (matchesEpisode(f.filename, season, episode)) {
-        streams.push({ name, title, url: f.download });
-      }
-    } else {
-      streams.push({ name, title, url: f.download });
+        if (!matchesEpisode(f.filename, season, episode)) continue;
     }
-  }
+
+    // KLUCZ: unrestrictujemy link do odtwarzania
+    const direct = await rdUnrestrict(f.download);
+    if (direct) {
+        streams.push({ name, title, url: direct });
+    }
+    }
 
   // 2) TORRENTY — ZAWSZE DIRECT z RD (TAK JAK DOWNLOADS)
   for (const t of ALL_TORRENTS_CACHE) {
