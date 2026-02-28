@@ -445,6 +445,11 @@ function getNormalizedKey(filename) {
   let rawTitle = match && match[1] ? match[1] : clean;
   return deLeet(rawTitle).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
+function getDisplayTitle(filename) {
+  const clean = String(filename || "").replace(/[\._]/g, " ");
+  const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
+  return match && match[1] ? match[1].trim() : clean;
+}
 
 function isTorrentOriginLink(link) {
   if (!link || typeof link !== "string") return false;
@@ -486,12 +491,6 @@ function dashboardHostersOnly(downloads) {
   );
 }
 
-function dashboardHostersOnly(downloads) {
-  // Dashboard: trzymajmy spójność z tym, co trafia do Stremio
-  return (downloads || []).filter(d =>
-    d && d.streamable === 1 && typeof d.download === "string" && d.download.startsWith("http")
-  );
-}
 function matchesEpisode(filename, season, episode) {
   if (!season || !episode) return false;
   const s = Number(season), e = Number(episode);
