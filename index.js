@@ -445,15 +445,44 @@ function getNormalizedKey(filename) {
   let rawTitle = match && match[1] ? match[1] : clean;
   return deLeet(rawTitle).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
-function getDisplayTitle(filename) {
-  const clean = String(filename || "").replace(/[\._]/g, " ");
-  const match = clean.match(/^(.+?)(?=\s+s\d{2})/i); 
-  return match && match[1] ? match[1].trim() : clean;
+
+function isTorrentOriginLink(link) {
+  if (!link || typeof link !== "string") return false;
+
+  try {
+    const u = new URL(link);
+    // Torrent-pochodne pozycje w RD często mają "oryginalny link" w formie:
+    // https://real-debrid.com/d/<TOKEN>
+    return u.hostname === "real-debrid.com" && u.pathname.startsWith("/d/");
+  } catch (e) {
+    // fallback jeśli link nie jest poprawnym URL
+    return link.includes("real-debrid.com/d/");
+  }
 }
+
 function hostersOnly(downloads) {
-  // To jest lista dla Stremio: tylko pozycje, które da się oglądać i mają direct URL
+  // To, co ma trafić do "MOJE ..." z DOWNLOADS:
+  // - streamable (żeby działało w Stremio)
+  // - ma direct download URL
+  // - NIE pochodzi z torrentów (czyli link != real-debrid.com/d/...)
   return (downloads || []).filter(d =>
-    d && d.streamable === 1 && typeof d.download === "string" && d.download.startsWith("http")
+    d &&
+    d.streamable === 1 &&
+    typeof d.download === "string" &&
+    d.download.startsWith("http") &&
+    !isTorrentOriginLink(d.link)
+  );
+}
+
+function dashboardHostersOnly(downloads) {
+  // Dashboard hosters: trzymamy to samo kryterium co w Stremio,
+  // żeby nie mieszać torrent-pochodnych pozycji z hosterami.
+  return (downloads || []).filter(d =>
+    d &&
+    d.streamable === 1 &&
+    typeof d.download === "string" &&
+    d.download.startsWith("http") &&
+    !isTorrentOriginLink(d.link)
   );
 }
 
