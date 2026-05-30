@@ -879,6 +879,7 @@ async function syncAllDownloadsAD() {
       `https://api.alldebrid.com/v4/user/links?agent=myaddon&apikey=${AD_TOKEN}`
     );
     const data = await r.json().catch(() => null);
+    console.log("AD raw response:", JSON.stringify(data));
     if (!data?.data?.links || !Array.isArray(data.data.links)) {
       console.warn("AD sync: brak danych lub błąd API", data);
       return;
