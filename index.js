@@ -884,8 +884,10 @@ async function syncAllDownloadsAD() {
       console.warn("AD sync: brak danych lub błąd API", data);
       return;
     }
+    // Filtruj tylko prawidłowe wpisy: host !== "error" i link_dl niepusty
+    const links = data.data.links.filter(f => f.host !== "error" && f.link_dl && f.link_dl.length > 0);
     // Ustaw unikalne f.id: używamy pola id z API lub fallback na index
-    ALL_AD_DOWNLOADS_CACHE = data.data.links.map((f, index) => ({
+    ALL_AD_DOWNLOADS_CACHE = links.map((f, index) => ({
       ...f,
       id: f.id != null ? String(f.id) : `ad_${index}`
     }));
@@ -1107,10 +1109,11 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
     }
 
-  // 2) AD DOWNLOADS — unrestrictujemy przez AllDebrid API
+  // 2) AD DOWNLOADS — link_dl to gotowy debrid.it URL, używamy bezpośrednio
   for (const f of ALL_AD_DOWNLOADS_CACHE) {
-    // AD: pola to id, filename, size, link, host, streamable
-    if (!f || f.streamable !== 1) continue;
+    // AD: pola to id, filename, size, link, link_dl, host, streamable
+    // link_dl jest już gotowym URL do streamowania (filtrowany w syncAllDownloadsAD)
+    if (!f || !f.link_dl) continue;
 
     const meta = METADATA_CACHE[f.id];
     if (!meta) continue;
@@ -1124,10 +1127,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     const smartInfo = getStreamInfo(f.filename, f.size);
     const title = `${f.filename}\n${smartInfo}`;
 
-    const direct = await adUnrestrict(f.link);
-    if (direct) {
-      streams.push({ name: "⚡ MOJE AD", title, url: direct });
-    }
+    streams.push({ name: "⚡ MOJE AD", title, url: f.link_dl });
   }
 
   // 3) TORRENTY — ZAWSZE DIRECT z RD (TAK JAK DOWNLOADS)
