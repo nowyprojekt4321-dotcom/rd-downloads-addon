@@ -876,7 +876,7 @@ async function syncAllDownloadsAD() {
   if (!AD_TOKEN) return;
   try {
     const r = await fetch(
-      `https://api.alldebrid.com/v4/user/links?agent=myaddon&apikey=${AD_TOKEN}`
+      `https://api.alldebrid.com/v4/user/history?agent=myaddon&apikey=${AD_TOKEN}`
     );
     const data = await r.json().catch(() => null);
     console.log("AD raw response:", JSON.stringify(data));
