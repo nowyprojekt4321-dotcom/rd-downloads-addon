@@ -12,6 +12,7 @@ const app = express();
 app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3001;
 const RD_TOKEN = process.env.RD_TOKEN;
+const AD_TOKEN = process.env.AD_TOKEN;
 const TMDB_KEY = process.env.TMDB_KEY;
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID;
 const TRAKT_USERNAME = process.env.TRAKT_USERNAME;
@@ -24,6 +25,10 @@ if (!TRAKT_CLIENT_ID || !TRAKT_USERNAME) {
 if (!RD_TOKEN) {
   console.error("❌ RD_TOKEN is not set.");
   process.exit(1);
+}
+
+if (!AD_TOKEN) {
+  console.warn("⚠️ AD_TOKEN nie jest ustawiony. AllDebrid nie będzie działać.");
 }
 
 // === CORS & STATIC FILES ===
@@ -41,8 +46,9 @@ app.use(express.urlencoded({ extended: true }));
 /* =========================
    CACHE & STATE
 ========================= */
-let ALL_DOWNLOADS_CACHE = []; 
-let ALL_TORRENTS_CACHE = [];  
+let ALL_DOWNLOADS_CACHE = [];
+let ALL_AD_DOWNLOADS_CACHE = [];
+let ALL_TORRENTS_CACHE = [];
 let METADATA_CACHE = {}; 
 let HIDDEN_GROUPS = new Set();
 let isUpdating = false;
@@ -533,6 +539,24 @@ function getBaseUrl(req) {
   return `${proto}://${req.get("host")}`;
 }
 
+async function adUnrestrict(link) {
+  if (!AD_TOKEN) return null;
+  try {
+    const r = await fetch(
+      `https://api.alldebrid.com/v4/link/unlock?agent=myaddon&apikey=${AD_TOKEN}&link=${encodeURIComponent(link)}`
+    );
+    const data = await r.json().catch(() => null);
+    if (!r.ok || !data?.data?.link) {
+      console.warn("AD unrestrict failed:", r.status, data);
+      return null;
+    }
+    return data.data.link;
+  } catch (e) {
+    console.warn("AD unrestrict error:", e.message);
+    return null;
+  }
+}
+
 async function rdUnrestrict(link) {
   const params = new URLSearchParams();
   params.append("link", link);
@@ -757,6 +781,24 @@ app.post("/manager/update-group", async (req, res) => {
     res.redirect("/manager");
 });
 
+async function syncAllDownloadsAD() {
+  if (!AD_TOKEN) return;
+  try {
+    const r = await fetch(
+      `https://api.alldebrid.com/v4/user/links?agent=myaddon&apikey=${AD_TOKEN}`
+    );
+    const data = await r.json().catch(() => null);
+    if (!data?.data?.links || !Array.isArray(data.data.links)) {
+      console.warn("AD sync: brak danych lub błąd API", data);
+      return;
+    }
+    ALL_AD_DOWNLOADS_CACHE = data.data.links;
+    console.log(`✅ AD sync: ${ALL_AD_DOWNLOADS_CACHE.length} linków`);
+  } catch (e) {
+    console.error("AD sync error:", e.message);
+  }
+}
+
 async function syncAllDownloads() {
   if (isUpdating) return;
   isUpdating = true;
@@ -787,6 +829,9 @@ async function syncAllDownloads() {
     }
     ALL_TORRENTS_CACHE = detailedTorrents;
   } catch (e) { console.error("Sync error:", e.message); } finally { isUpdating = false; }
+
+  // Synchronizuj też AllDebrid (niezależnie od błędów RD)
+  await syncAllDownloadsAD();
 }
 
 /* =========================
@@ -966,7 +1011,30 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
     }
 
-  // 2) TORRENTY — ZAWSZE DIRECT z RD (TAK JAK DOWNLOADS)
+  // 2) AD DOWNLOADS — unrestrictujemy przez AllDebrid API
+  for (const f of ALL_AD_DOWNLOADS_CACHE) {
+    // AD: pola to id, filename, size, link, host, streamable
+    if (!f || f.streamable !== 1) continue;
+
+    const meta = METADATA_CACHE[f.id];
+    if (!meta) continue;
+
+    if (!(meta.id === baseId || meta.tmdb_id === baseId.replace("tmdb:", ""))) continue;
+
+    if (type === "series") {
+      if (!matchesEpisode(f.filename, season, episode)) continue;
+    }
+
+    const smartInfo = getStreamInfo(f.filename, f.size);
+    const title = `${f.filename}\n${smartInfo}`;
+
+    const direct = await adUnrestrict(f.link);
+    if (direct) {
+      streams.push({ name: "⚡ MOJE AD", title, url: direct });
+    }
+  }
+
+  // 3) TORRENTY — ZAWSZE DIRECT z RD (TAK JAK DOWNLOADS)
   for (const t of ALL_TORRENTS_CACHE) {
     if (t.status !== "downloaded") continue;
 
