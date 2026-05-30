@@ -54,7 +54,7 @@
       @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
     <script>
-      function toggleView(v) { localStorage.setItem('savedView', v); document.getElementById('btn-downloads').classList.remove('active'); document.getElementById('btn-torrents').classList.remove('active'); document.getElementById('btn-'+v).classList.add('active'); document.getElementById('view-downloads').classList.remove('active'); document.getElementById('view-torrents').classList.remove('active'); document.getElementById('view-'+v).classList.add('active'); switchTab(v,'series'); }
+      function toggleView(v) { localStorage.setItem('savedView', v); document.getElementById('btn-downloads').classList.remove('active'); document.getElementById('btn-torrents').classList.remove('active'); document.getElementById('btn-alldebrid').classList.remove('active'); document.getElementById('btn-'+v).classList.add('active'); document.getElementById('view-downloads').classList.remove('active'); document.getElementById('view-torrents').classList.remove('active'); document.getElementById('view-alldebrid').classList.remove('active'); document.getElementById('view-'+v).classList.add('active'); switchTab(v,'series'); }
       function switchTab(v,t) { localStorage.setItem('savedType', t); const c=document.getElementById('view-'+v); c.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); c.querySelectorAll('.grid-container').forEach(x=>x.classList.remove('active')); document.getElementById('tab-'+v+'-'+t).classList.add('active'); document.getElementById('grid-'+v+'-'+t).classList.add('active'); }
       function showDetails(t,f) { const fs=JSON.parse(decodeURIComponent(f)); document.getElementById('modalTitle').textContent=t; document.getElementById('modalBody').innerHTML=fs.map(x=>`<div class="file-item"><span class="icon" style="color:#666">description</span><span>${x}</span></div>`).join(''); document.getElementById('infoModal').style.display='flex'; }
       function closeModal() { document.getElementById('infoModal').style.display='none'; }
@@ -87,6 +87,7 @@
     <div class="switch-container">
         <button id="btn-downloads" class="switch-btn active" onclick="toggleView('downloads')"><span class="icon">download</span> DOWNLOADS</button>
         <button id="btn-torrents" class="switch-btn" onclick="toggleView('torrents')"><span class="icon">link</span> TORRENTS</button>
+        <button id="btn-alldebrid" class="switch-btn" onclick="toggleView('alldebrid')"><span class="icon">bolt</span> ALLDEBRID</button>
     </div>
     
     <div class="search-container">
@@ -115,6 +116,13 @@
         
         {{GRID_TORRENTS_SERIES}}
         {{GRID_TORRENTS_MOVIE}}
+    </div>
+
+    <div id="view-alldebrid" class="view-section">
+        <div class="tabs"><div id="tab-alldebrid-series" class="tab active" onclick="switchTab('alldebrid','series')"><span class="icon">tv</span> SERIALE</div><div id="tab-alldebrid-movie" class="tab" onclick="switchTab('alldebrid','movie')"><span class="icon">movie</span> FILMY</div></div>
+        
+        {{GRID_AD_SERIES}}
+        {{GRID_AD_MOVIE}}
     </div>
 </body>
 </html>

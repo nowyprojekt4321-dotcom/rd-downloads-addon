@@ -691,6 +691,8 @@ app.get("/manager", async (req, res) => {
       const gridDLMovie = renderGrid('movie', groupsDownloads, showHidden, 'downloads', false);
       const gridTorSeries = renderGrid('series', groupsTorrents, showHidden, 'torrents', true);
       const gridTorMovie = renderGrid('movie', groupsTorrents, showHidden, 'torrents', false);
+      const gridADSeries = renderGridAD('series', showHidden);
+      const gridADMovie = renderGridAD('movie', showHidden);
 
       let template = fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
       let page = template
@@ -702,11 +704,76 @@ app.get("/manager", async (req, res) => {
           .replace('{{GRID_DOWNLOADS_SERIES}}', gridDLSeries)
           .replace('{{GRID_DOWNLOADS_MOVIE}}', gridDLMovie)
           .replace('{{GRID_TORRENTS_SERIES}}', gridTorSeries)
-          .replace('{{GRID_TORRENTS_MOVIE}}', gridTorMovie);
+          .replace('{{GRID_TORRENTS_MOVIE}}', gridTorMovie)
+          .replace('{{GRID_AD_SERIES}}', gridADSeries)
+          .replace('{{GRID_AD_MOVIE}}', gridADMovie);
 
       res.send(page);
   } catch (e) { console.error("Błąd Dashboardu:", e); res.status(500).send("Błąd serwera: " + e.message); }
 });
+
+function renderGridAD(type, showHidden) {
+    const isActive = type === 'series';
+    let html = `<div id="grid-alldebrid-${type}" class="grid-container ${isActive ? 'active' : ''}">`;
+
+    // Grupuj po getNormalizedKey(f.filename)
+    const groups = {};
+    ALL_AD_DOWNLOADS_CACHE.forEach((f, index) => {
+        const filename = f.filename || f.name || `plik_${index}`;
+        const detectedType = detectType(filename);
+        if (detectedType !== type) return;
+
+        const key = getNormalizedKey(filename);
+        const displayTitle = getDisplayTitle(filename);
+        if (!groups[key]) {
+            groups[key] = {
+                key,
+                displayName: displayTitle,
+                files: [],
+                poster: null,
+                detectedName: null,
+                assignedId: null,
+                type: detectedType,
+                size: 0
+            };
+        }
+        groups[key].files.push(f);
+        groups[key].size += (f.size || f.filesize || 0);
+
+        // Sprawdź METADATA_CACHE po f.id
+        if (METADATA_CACHE[f.id]) {
+            const m = METADATA_CACHE[f.id];
+            groups[key].assignedId = m.id;
+            groups[key].poster = m.poster;
+            groups[key].detectedName = m.name;
+            groups[key].type = m.type;
+        }
+    });
+
+    const sorted = Object.values(groups).sort((a, b) => {
+        if (!a.assignedId && b.assignedId) return -1;
+        if (a.assignedId && !b.assignedId) return 1;
+        return b.files.length - a.files.length;
+    });
+
+    for (const g of sorted) {
+        if (HIDDEN_GROUPS.has(g.key) && !showHidden) continue;
+
+        const posterSrc = g.poster
+            ? `<img src="${g.poster}" class="poster-img">`
+            : `<div class="no-poster"><span class="icon" style="font-size:40px">image_not_supported</span></div>`;
+        const currentId = (g.assignedId && g.assignedId.startsWith("tt")) ? g.assignedId : "";
+        const searchUrl = `https://www.imdb.com/find?q=${encodeURIComponent(getSearchQuery(g.displayName))}`;
+        const cardClass = HIDDEN_GROUPS.has(g.key) ? "card hidden-item" : "card";
+        const filesEncoded = encodeURIComponent(JSON.stringify(g.files.map(f => f.filename || f.name || "")));
+        const safeTitle = g.detectedName || g.displayName;
+        const adIds = g.files.map(f => f.id).join(",");
+
+        html += `<div class="${cardClass}" data-title="${safeTitle}"><div class="poster-area" onclick="showDetails('${safeTitle.replace(/'/g, "\\'")}', '${filesEncoded}')">${posterSrc}<div class="badge"><span class="icon" style="font-size:14px">folder</span> ${g.files.length}</div><div class="size-badge">${formatBytes(g.size)}</div></div><div class="content"><div class="title" onclick="showDetails('${safeTitle.replace(/'/g, "\\'")}', '${filesEncoded}')">${safeTitle}</div><a href="${searchUrl}" target="_blank" class="btn-imdb"><span class="icon" style="font-size:16px">search</span> Szukaj ID</a><form action="/manager/update-group-ad" method="POST" style="margin:0;"><input type="hidden" name="groupKey" value="${g.key}"><div class="input-row"><input type="text" name="imdbId" value="${currentId}" placeholder="tt..."><button type="submit" class="btn-icon-only"><span class="icon">save</span></button></div></form><div style="display:flex; gap:5px; margin-top:5px;"><form action="/manager/toggle-hide" method="POST" style="margin:0; flex:1;"><input type="hidden" name="groupKey" value="${g.key}">${HIDDEN_GROUPS.has(g.key) ? `<button type="submit" class="btn-restore"><span class="icon">undo</span></button>` : `<button type="submit" class="btn-delete" style="color:#888; border-color:#444"><span class="icon">visibility_off</span></button>`}</form><form action="/manager/delete-ad" method="POST" style="margin:0; flex:1;" onsubmit="return confirmDelete()"><input type="hidden" name="adIds" value="${adIds}"><button type="submit" class="btn-delete"><span class="icon">delete</span></button></form></div></div></div>`;
+    }
+
+    return html + `</div>`;
+}
 
 function renderGrid(type, groups, showHidden, viewMode, isActive) {
     let html = `<div id="grid-${viewMode}-${type}" class="grid-container ${isActive ? 'active' : ''}">`;
@@ -780,6 +847,30 @@ app.post("/manager/update-group", async (req, res) => {
     }
     res.redirect("/manager");
 });
+app.post("/manager/update-group-ad", async (req, res) => {
+    const { groupKey, imdbId } = req.body;
+    if (imdbId) {
+        let meta = await fetchCinemeta(imdbId);
+        ALL_AD_DOWNLOADS_CACHE.forEach(f => {
+            const filename = f.filename || f.name || "";
+            if (getNormalizedKey(filename) === groupKey) METADATA_CACHE[f.id] = meta;
+        });
+    }
+    res.redirect("/manager");
+});
+app.post("/manager/delete-ad", async (req, res) => {
+    const ids = req.body.adIds.split(",");
+    for (const id of ids) {
+        try {
+            await fetch(
+                `https://api.alldebrid.com/v4/user/links/delete?agent=myaddon&apikey=${AD_TOKEN}&id=${id}`,
+                { method: "GET" }
+            );
+        } catch (e) { console.error("AD delete error:", e.message); }
+    }
+    await syncAllDownloadsAD();
+    res.redirect("/manager");
+});
 
 async function syncAllDownloadsAD() {
   if (!AD_TOKEN) return;
@@ -792,7 +883,11 @@ async function syncAllDownloadsAD() {
       console.warn("AD sync: brak danych lub błąd API", data);
       return;
     }
-    ALL_AD_DOWNLOADS_CACHE = data.data.links;
+    // Ustaw unikalne f.id: używamy pola id z API lub fallback na index
+    ALL_AD_DOWNLOADS_CACHE = data.data.links.map((f, index) => ({
+      ...f,
+      id: f.id != null ? String(f.id) : `ad_${index}`
+    }));
     console.log(`✅ AD sync: ${ALL_AD_DOWNLOADS_CACHE.length} linków`);
   } catch (e) {
     console.error("AD sync error:", e.message);
