@@ -1009,6 +1009,7 @@ async function handleCatalog(req, res) {
 
     files.forEach(collect);
     ALL_TORRENTS_CACHE.filter((t) => t.status === "downloaded").forEach(collect);
+    ALL_AD_DOWNLOADS_CACHE.forEach(collect);
 
     // dociągnij header z Cinemeta (z cache) dla unikalnych pozycji
     const metas = await Promise.all(
